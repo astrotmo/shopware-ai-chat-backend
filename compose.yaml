@@ -1,0 +1,44 @@
+
+services:
+  ollama:
+    image: ollama/ollama:0.14.3-rc2
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  mcp:
+    build: .
+    env_file:
+      - .env
+    command:
+      [
+        "python",
+        "shopware_mcp_server.py"
+      ]
+    ports:
+      - "8005:8005"
+    volumes:
+      - .:/app
+      
+  server:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      - mcp
+      - ollama
+    ports:
+      - "8002:8002"
+    volumes:
+      - .:/app
+
+volumes:
+  ollama_data:
