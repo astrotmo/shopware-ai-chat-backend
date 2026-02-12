@@ -124,11 +124,15 @@ def _norm_product(p: Dict[str, Any], include: bool) -> Dict[str, Any]:
     t = p.get("translated") or {}
     name = t.get("name") or p.get("name")
     pid = p.get("id")
+    unit = p.get("unit") or {}
 
     out = {
         "id": pid,
         "name": name,
         "productNumber": p.get("productNumber"),    
+        "purchaseUnit": p.get("purchaseUnit"),
+        "unitShortCode": unit.get("shortCode"),
+        "unitName": unit.get("name"),
     }
 
     if include:
@@ -177,12 +181,13 @@ async def search_products_public(query: str, limit: int = 10, locale: str = DEFA
     criteria = {
         "limit": lim,
         "term": query,
-        "includes": {"product": ["id","productNumber","name","translated"]},
+        "includes": {"product": ["id","productNumber","name","translated", "purchaseUnit", "unit"]},
     }
     data = await sw_search("product", criteria)
     items = [_norm_product(p, include=False) for p in data.get("data", [])]
     logger.info("Successfully searched products")
     logger.debug("Successfully searched products with query: %s", query)
+    logger.debug("Result: \n%s", items)
     
     result = {"items": items, "count": len(items)}
     if JsonContent:
@@ -205,7 +210,7 @@ async def search_products_auth(query: str, limit: int = 10, locale: str = DEFAUL
     criteria = {
         "limit": lim,
         "term": query,
-        "includes": {"product": ["id","productNumber","name","stock","active","price","translated"]},
+        "includes": {"product": ["id","productNumber","name","stock","active","price","translated", "purchaseUnit", "unit"]},
     }
     data = await sw_search("product", criteria)
     items = [_norm_product(p, include=True) for p in data.get("data", [])]
@@ -279,7 +284,7 @@ async def get_product_by_number_public(product_number: str, limit: int = 1, loca
     criteria = {
         "limit": lim,
         "filter": [{"type": "equals", "field": "product.productNumber", "value": product_number}],
-        "includes": {"product": ["id","productNumber","name", "translated"]},
+        "includes": {"product": ["id","productNumber","name", "translated", "purchaseUnit", "unit"]},
     }
     data = await sw_search("product", criteria)
     items = [_norm_product(p, include=False) for p in data.get("data", [])]
@@ -307,7 +312,7 @@ async def get_product_by_number_auth(product_number: str, limit: int = 1, locale
     criteria = {
         "limit": lim,
         "filter": [{"type": "equals", "field": "product.productNumber", "value": product_number}],
-        "includes": {"product": ["id","productNumber","name","stock","active","price","translated"]},
+        "includes": {"product": ["id","productNumber","name","stock","active","price","translated", "purchaseUnit", "unit"]},
     }
     data = await sw_search("product", criteria)
     items = [_norm_product(p, include=True) for p in data.get("data", [])]

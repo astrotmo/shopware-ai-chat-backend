@@ -14,6 +14,9 @@ from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.session import ClientSession
 
 from openai.types.chat import ChatCompletionMessageParam
+from openai.types.chat import ChatCompletionSystemMessageParam
+from openai.types.chat import ChatCompletionUserMessageParam
+from openai.types.chat import ChatCompletionAssistantMessageParam
 from openai.types.chat import ChatCompletionToolUnionParam
 
 load_dotenv()
@@ -49,9 +52,14 @@ ENTSCHEIDUNGSREGELN (WICHTIG):
    - (Die finale Ausgabe wird später als JSON inkl. Formular formatiert.)
 
 2) Wenn die Nutzerfrage Produkte, Kategorien oder Produktdetails betrifft:
-   - MUSST du Tools aufrufen, um Infos abzurufen.
+   - Kannst du Tools aufrufen, um Infos abzurufen oder die Details aus dem Chat-Verlauf nutzen.
    - Erfinde niemals Produktdaten.
    - Gib KEINE finale Antwort aus, sondern nur Tool-Calls (content darf leer sein).
+
+3) Beachte in Bezug auf die Nutzerfrage:
+    - Der Nutzer könnte Fragen zu Produkten stellen, die bereits in der Historie erwähnt wurden. Hier darfst du Bezug auf die vorherigen Nachrichten nehmen anstatt einen weiteren Tool-Call zu machen.
+    - Der Nutzer verwendet in seiner Anfrage Synonyme oder achtet nicht auf Singular/Plural bei der Produktbezeichnung. Passe dementsprechend den Tool-Call an.
+    - Der Nutzer fragt z.B. "Ich brauche 100kg X" - hier kannst du zu erst nach X suchen, dann schauen, welche Einheit passende Produkte haben und im text-block entsprechend darauf eingehen, welche Verkaufsmengen die gewünschte Menge ergeben (UMRECHNEN).
 
 VERFÜGBARE TOOLS:
 - search_products_public: Suche Produkte per Freitext (ohne Preise).
@@ -61,6 +69,11 @@ VERFÜGBARE TOOLS:
 
 Wenn du Tools aufrufst, setze finish_reason="tool_calls" und gib passende Argumente an.
 Falls du kein Ergebnis von den Tools erhältst, melde dies als Fehler.
+
+ACHTUNG: Der Nutzer könnte sich in der Frage auf bereits ausgetauschte Nachrichten beziehen.
+Berücksichtige den gesamten Chat-Verlauf (history), um solche Bezüge zu verstehen. In der history können sowohl Nutzer- als auch Assistenten-Nachrichten enthalten sein.
+
+ALLGEMEIN: Antworte klar, knapp und freundlich.
 """
 
 """ Format prompt for public requests to the LLM to format the final answer as JSON"""
@@ -82,6 +95,8 @@ Nutze dieses Schema:
           "id": "string",
           "name": "string",
           "productNumber": "string",
+          "purchaseUnit": "string",
+          "unitShortCode": "string"
         }
       ]
     },
@@ -119,10 +134,13 @@ REGELN ZUM JSON-SCHEMA
   - "error": echte Fehler (z.B. Tool nicht verfügbar)
 - "blocks" ist IMMER ein Array.
 - Jeder Block hat ein "kind".
-- Verwende IMMER mindestens einen "text"-Block.
+- Verwende IMMER mindestens einen "text"-Block, in dem du KEINE Produktnamen etc. ausgibst, sondern nur den Inhalt deiner Antwort erklärst (z.B. "Wir haben folgende Sonnenblumenkerne im Angebot", danach folgt der nächste Block).
 - Wenn Produkte erwähnt oder empfohlen werden, MUSS zusätzlich ein "product_list"-Block enthalten sein, da im Antwort "text" KEINE Produktdetails ausgegeben werden dürfen.
+- Falls du die Antwort ohne tool-Aufruf generierst und eine product_list anhängst, nutze die Daten aus den vorausgegangenen Nachrichten (eg. UUID => 'id' Feld etc.).
+- Falls bei Produkdetails die Einheit fehlt (unitShortCode), kannst du sie aus dem Namen ableiten (z.B. "Sonnenblumenkerne 25kg Sack" => "kg").
 
 KONTAKTFORMULAR (PUBLIC):
+- Das Formular wird NUR ausgegeben, wenn der Nutzer explizit nach einer Kontaktaufnahme fragt oder nicht genügend Informationen für eine Antwort vorhanden sind (z.B. unklare Anfrage, etc.).
 - Keine Preise/Konditionen nennen oder andeuten.
 - Wenn nach Preisen, Konditionen, Angeboten, Rabatten, Staffelpreisen, Versandkosten gefragt wird:
   - Gib einen "formular"-Block aus (zusätzlich zum "text"-Block).
@@ -139,6 +157,7 @@ SPRACHE & STIL
   - "product_list" für Produkte
   - "info_box" für Hinweise oder leere Ergebnisse
   - "formular" für Kontaktanfragen
+- Markdown für die Formatierung der text und info_box Blocks ist erlaubt.
 
 FEHLERFALL
 - Wenn du unsicher bist, liefere trotzdem syntaktisch gültiges JSON
@@ -146,7 +165,6 @@ FEHLERFALL
 
 WICHTIG (PUBLIC):
 - Keine Preise/Konditionen nennen oder andeuten.
-- Wenn nach Preisen gefragt wird: Hinweis, dass Preise & Konditionen nach Login oder über das Kontaktformular erfragt werden können.
 - Produktdetails nie im Text-Block ausgeben, sondern nur in product_list.
 """
 
@@ -383,9 +401,9 @@ if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
     handler = logging.StreamHandler()
     formatter = logging.Formatter("%(levelname)s %(name)s: %(message)s")
     handler.setFormatter(formatter)
-    handler.addFilter(
-        lambda record: record.levelno != logging.INFO
-    )
+    #handler.addFilter(
+    #    lambda record: record.levelno != logging.INFO
+    #)
     logger.addHandler(handler)
 
 class ChatIn(BaseModel):
@@ -530,8 +548,6 @@ async def chat(in_: ChatIn, request: Request):
     FORMAT_PROMPT = FORMAT_PROMPT_PUBLIC
     TOOLS = TOOLS_PUBLIC
 
-    logger.debug("👤 Context: \n%sLogged In:\n%s", in_.model_dump_json(ensure_ascii=False, indent=2), user_logged_in)
-
 
     if CHAT_DRY_RUN:
         return {
@@ -545,9 +561,6 @@ async def chat(in_: ChatIn, request: Request):
 
     logger.info("💬 Received chat request: %s", in_.message)
     logger.debug("💬 Full chat request:\n%s", in_.model_dump_json(ensure_ascii=False, indent=2))
-    
-    if in_.history:
-        logger.info("📜 History:\n%s", json.dumps(in_.history, ensure_ascii=False, indent=2))
 
     """
     Prepare messages for the LLM: system prompt + history + new user message.
@@ -560,17 +573,14 @@ async def chat(in_: ChatIn, request: Request):
     Append history from the frontend (if you send it there).
     """
     for h in in_.history or []:
-        role = h.get("role")
-        if role in ("user", "assistant"):
-            messages.append({
-                "role": role,
-                "content": h.get("content", ""),
-            })
+        messages.append(h)
 
     """
     Append current user message.
     """
     messages.append({"role": "user", "content": in_.message})
+
+    logger.debug("📥 Actual Messages:\n%s", json.dumps(messages, ensure_ascii=False, indent=2))
 
     """
     Determine effective model to use
@@ -739,7 +749,7 @@ async def chat_with_tools(
     for _ in range(8):  # Limit to max 8 iterations
         logger.debug("🔄 Chat loop phase: %s", phase.name)
         logger.info("🧠 Sending to Ollama model %s", model)
-        logger.debug("🧠 Sending to Ollama model %s:\n%s", model, json.dumps(messages, ensure_ascii=False, indent=2))
+        logger.debug("🧠 Sending to Ollama model %s:\n%s", model, json.dumps(truncate_log(messages), ensure_ascii=False, indent=2))
 
         t0 = time.perf_counter()
         _trace("ollama_request", {
@@ -829,7 +839,7 @@ async def chat_with_tools(
 
     logger.debug("🔄 Chat loop phase: %s", phase.name)
     logger.info("🧠 Sending final formatting request to Ollama model %s", model)
-    logger.debug("🧠 Sending final formatting request to Ollama model %s:\n%s", model, json.dumps(final_messages, ensure_ascii=False, indent=2))
+    logger.debug("🧠 Sending final formatting request to Ollama model %s:\n%s", model, json.dumps(truncate_log(final_messages), ensure_ascii=False, indent=2))
 
     t0 = time.perf_counter()
     _trace("ollama_request", {
