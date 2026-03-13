@@ -112,7 +112,7 @@ async def sw_get(resource: str, id_: str) -> Dict[str, Any]:
         resp.raise_for_status()
         return resp.json()
 
-def _norm_product(p: Dict[str, Any], include: bool) -> Dict[str, Any]:
+def _norm_product(p: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalize a product dictionary from Shopware API to a simplified format.
 
@@ -135,16 +135,6 @@ def _norm_product(p: Dict[str, Any], include: bool) -> Dict[str, Any]:
         "unitName": unit.get("name"),
     }
 
-    if include:
-        price_raw = p.get("price", [])[0]
-        price = str(price_raw.get("gross")) if price_raw else None
-        price_eur = price.replace(".", ",") if price is not None else None
-        out.update({
-            "price": price_eur,
-            "stock": p.get("stock"),
-            "active": p.get("active"),
-        })
-    
     return out
 
 def _norm_category(c: Dict[str, Any]) -> Dict[str, Any]:
@@ -184,38 +174,10 @@ async def search_products_public(query: str, limit: int = 10, locale: str = DEFA
         "includes": {"product": ["id","productNumber","name","translated", "purchaseUnit", "unit"]},
     }
     data = await sw_search("product", criteria)
-    items = [_norm_product(p, include=False) for p in data.get("data", [])]
+    items = [_norm_product(p) for p in data.get("data", [])]
     logger.info("Successfully searched products")
     logger.debug("Successfully searched products with query: %s", query)
     logger.debug("Result: \n%s", items)
-    
-    result = {"items": items, "count": len(items)}
-    if JsonContent:
-        return JsonContent(result)
-    return result
-
-
-@mcp.tool()
-async def search_products_auth(query: str, limit: int = 10, locale: str = DEFAULT_LOCALE):
-    """
-    Search products by term for authenticated users.
-
-    :param query: Search term
-    :param limit: Maximum number of products to return (1-100)
-    :param locale: Locale for translations
-    :return: Dictionary with list of products and count
-    :rtype: Dict[str, Any]
-    """
-    lim = max(1, min(int(limit), 100))
-    criteria = {
-        "limit": lim,
-        "term": query,
-        "includes": {"product": ["id","productNumber","name","stock","active","price","translated", "purchaseUnit", "unit"]},
-    }
-    data = await sw_search("product", criteria)
-    items = [_norm_product(p, include=True) for p in data.get("data", [])]
-    logger.info("Successfully searched products")
-    logger.debug("Successfully searched products with query: %s", query)
     
     result = {"items": items, "count": len(items)}
     if JsonContent:
@@ -240,30 +202,7 @@ async def get_product_by_id_public(id: str, locale: str = DEFAULT_LOCALE):
     logger.info("Successfully searched products")
     logger.debug("Successfully searched products with id: %s", id)
 
-    result = _norm_product(p, include=False)
-    if JsonContent:
-        return JsonContent(result)
-    return result
-
-
-@mcp.tool()
-async def get_product_by_id_auth(id: str, locale: str = DEFAULT_LOCALE):
-    """
-    Fetch a single product by UUID for authenticated users.
-    
-    :param id: Product UUID
-    :param locale: Locale for translations
-    :return: Normalized product data or error message
-    :rtype: Dict[str, Any]
-    """
-    res = await sw_get("product", id)
-    p = res.get("data") if isinstance(res, dict) and "data" in res else res
-    if not p:
-        return {"error": f"Product {id} not found"}
-    logger.info("Successfully searched products")
-    logger.debug("Successfully searched products with id: %s", id)
-
-    result = _norm_product(p, include=True)
+    result = _norm_product(p)
     if JsonContent:
         return JsonContent(result)
     return result
@@ -287,35 +226,7 @@ async def get_product_by_number_public(product_number: str, limit: int = 1, loca
         "includes": {"product": ["id","productNumber","name", "translated", "purchaseUnit", "unit"]},
     }
     data = await sw_search("product", criteria)
-    items = [_norm_product(p, include=False) for p in data.get("data", [])]
-    logger.info("Successfully searched products")
-    logger.debug("Successfully searched products with product_number: %s", product_number)
-
-    result = {"items": items, "count": len(items)}
-    if JsonContent:
-        return JsonContent(result)
-    return result
-
-
-@mcp.tool()
-async def get_product_by_number_auth(product_number: str, limit: int = 1, locale: str = DEFAULT_LOCALE):
-    """
-    Fetch product(s) by exact productNumber for authenticated users.
-    
-    :param product_number: Product number to search for
-    :param limit: Maximum number of products to return (1-10)
-    :param locale: Locale for translations
-    :return: Dictionary with list of products and count
-    :rtype: Dict[str, Any]
-    """
-    lim = max(1, min(int(limit), 10))
-    criteria = {
-        "limit": lim,
-        "filter": [{"type": "equals", "field": "product.productNumber", "value": product_number}],
-        "includes": {"product": ["id","productNumber","name","stock","active","price","translated", "purchaseUnit", "unit"]},
-    }
-    data = await sw_search("product", criteria)
-    items = [_norm_product(p, include=True) for p in data.get("data", [])]
+    items = [_norm_product(p) for p in data.get("data", [])]
     logger.info("Successfully searched products")
     logger.debug("Successfully searched products with product_number: %s", product_number)
 

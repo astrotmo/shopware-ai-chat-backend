@@ -1,13 +1,14 @@
 
 services:
   ollama:
-    image: ollama/ollama:0.14.3-rc2
+    image: ollama/ollama:0.17.1-rc2
     environment:
       - OLLAMA_DEBUG=1
     ports:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+      - /mnt/e/llm-work/gguf:/models:ro
     deploy:
       resources:
         reservations:

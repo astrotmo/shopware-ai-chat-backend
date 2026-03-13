@@ -1,12 +1,14 @@
-from inspect import trace
-import os, json, logging, asyncio, base64, time, hashlib, hmac
+import os, json, logging, asyncio, time
 from typing import Any, Callable, Dict, List, Optional, cast
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 from openai import OpenAI
 from enum import Enum, auto
 
@@ -19,25 +21,42 @@ from openai.types.chat import ChatCompletionUserMessageParam
 from openai.types.chat import ChatCompletionAssistantMessageParam
 from openai.types.chat import ChatCompletionToolUnionParam
 
+from backend.app.services.domain_knowledge_loader import JsonDomainTermsProvider
+from backend.app.services.domain_knowledge_prompt import build_domain_knowledge_prompt_block
+from backend.app.services.domain_knowledge_resolver import DomainKnowledgeResolver
+
 load_dotenv()
 
 CHAT_HOST = os.getenv("CHAT_HOST", "0.0.0.0")
 CHAT_PORT = int(os.getenv("CHAT_PORT", "8002"))
 CHAT_LOGGING_LEVEL = os.getenv("CHAT_LOGGING_LEVEL", "info").upper()
-CHAT_AUTH_SECRET = os.getenv("CHAT_AUTH_SECRET", "")
 CHAT_DRY_RUN = os.getenv("CHAT_DRY_RUN", "0") in ("1","true","TRUE","yes","YES")
+CORS_ORIGIN_REGEX = os.getenv("CORS_ORIGIN_REGEX", "").strip()
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip("/")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "ollama")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+OLLAMA_NUM_CTX = os.getenv("OLLAMA_NUM_CTX", "").strip()
+OLLAMA_NUM_CTX_BY_MODEL = os.getenv("OLLAMA_NUM_CTX_BY_MODEL", "").strip()
+OLLAMA_MODEL_ALIAS_BY_MODEL = os.getenv("OLLAMA_MODEL_ALIAS_BY_MODEL", "").strip()
 
 MCP_URL = os.getenv("MCP_URL", "http://localhost:8005/mcp").rstrip("/")
+DOMAIN_KNOWLEDGE_ENABLED = os.getenv("DOMAIN_KNOWLEDGE_ENABLED", "1") in ("1", "true", "TRUE", "yes", "YES")
+DOMAIN_KNOWLEDGE_PATH = os.getenv("DOMAIN_KNOWLEDGE_PATH", "backend/data/domain_terms.json").strip()
+DOMAIN_KNOWLEDGE_MAX_MATCHES_RAW = os.getenv("DOMAIN_KNOWLEDGE_MAX_MATCHES", "4").strip()
+DOMAIN_KNOWLEDGE_ENABLE_FUZZY = os.getenv("DOMAIN_KNOWLEDGE_ENABLE_FUZZY", "1") in ("1", "true", "TRUE", "yes", "YES")
+DOMAIN_KNOWLEDGE_FUZZY_THRESHOLD_RAW = os.getenv("DOMAIN_KNOWLEDGE_FUZZY_THRESHOLD", "0.93").strip()
 
 TRACE_ENABLED = os.getenv("TRACE_ENABLED", "0") == "1"
 
 TRACE_STORE: dict[str, list[dict]] = {}
 TRACE_TTL_SECONDS = 60 * 10
 TRACE_CREATED: dict[str, float] = {}
+
+RESPONSE_TYPES = {"answer", "clarification", "error"}
+INFO_BOX_STYLES = {"info", "warning", "error"}
+FORM_FIELD_TYPES = {"text", "email", "textarea", "tel", "number"}
+ALLOWED_HISTORY_ROLES = {"user", "assistant"}
 
 """ Tool prompt for the LLM to behave as Shopware Storefront assistant """
 TOOL_PROMPT = """
@@ -168,64 +187,6 @@ WICHTIG (PUBLIC):
 - Produktdetails nie im Text-Block ausgeben, sondern nur in product_list.
 """
 
-""" Format prompt for authenticated requests to the LLM to format the final answer as JSON"""
-FORMAT_PROMPT_AUTH="""
-Gib jetzt die finale Antwort als GENAU EIN JSON-OBJEKT aus (kein Text außerhalb).
-Nutze dieses Schema:
-{
-  "type": "answer" | "clarification" | "error",
-  "blocks": [
-    {
-      "kind": "text",
-      "text": "Antwort in natürlicher Sprache."
-    },
-    {
-      "kind": "product_list",
-      "title": "string",
-      "products": [
-        {
-          "id": "string",
-          "name": "string",
-          "price": "string|null",
-          "currency": "string|null"
-        }
-      ]
-    },
-    {
-      "kind": "info_box",
-      "style": "info" | "warning" | "error",
-      "title": "string",
-      "text": "string"
-    }
-  ]
-}
-
-REGELN ZUM JSON-SCHEMA
-- "type" beschreibt den Charakter der Antwort:
-  - "answer": normale Antworten
-  - "clarification": Rückfragen, wenn Informationen fehlen
-  - "error": echte Fehler (z.B. Tool nicht verfügbar)
-- "blocks" ist IMMER ein Array.
-- Jeder Block hat ein "kind".
-- Verwende IMMER mindestens einen "text"-Block.
-- Wenn Produkte erwähnt oder empfohlen werden, MUSS zusätzlich ein "product_list"-Block enthalten sein, da im Antwort "text" KEINE Produktdetails ausgegeben werden dürfen.
-
-SPRACHE & STIL
-- Schreibe klar, knapp und freundlich.
-- Wenige Emojis sind erlaubt, aber nicht erforderlich.
-- Nutze die Blocks sinnvoll:
-  - "text" für Erklärung
-  - "product_list" für Produkte
-  - "info_box" für Hinweise oder leere Ergebnisse
-
-FEHLERFALL
-- Wenn du unsicher bist, liefere trotzdem syntaktisch gültiges JSON
-  und erkläre die Unsicherheit im "text"-Block.
-
-WICHTIG (AUTH):
-- Produktdetails nie im Text-Block ausgeben, sondern nur in product_list.
-"""
-
 """ MCP Tool Definitions and Call Logic for public requests"""
 TOOLS_PUBLIC: list[ChatCompletionToolUnionParam] = [
     {
@@ -310,89 +271,6 @@ TOOLS_PUBLIC: list[ChatCompletionToolUnionParam] = [
     }
 ]
 
-TOOLS_AUTH: list[ChatCompletionToolUnionParam] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_products_auth",
-            "description": "Suche nach Produkten inkl. Preisen und Konditionen.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Suchbegriff (Produktname, Artikelnummer, etc.)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximale Anzahl Ergebnisse",
-                        "default": 10
-                    },
-                    "locale": {
-                        "type": "string",
-                        "description": "Locale (z.B. de-DE)",
-                        "default": "de-DE"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_product_by_id_auth",
-            "description": "Lädt ein Produkt anhand der ID inkl. Preis.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "description": "Produkt-ID"
-                    },
-                    "locale": {
-                        "type": "string",
-                        "default": "de-DE"
-                    }
-                },
-                "required": ["id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_product_by_number_auth",
-            "description": "Lädt ein Produkt anhand der Artikelnummer inkl. Preis.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "product_number": {
-                        "type": "string",
-                        "description": "Artikelnummer"
-                    },
-                    "locale": {
-                        "type": "string",
-                        "default": "de-DE"
-                    }
-                },
-                "required": ["product_number"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_categories",
-            "description": "Listet Produktkategorien auf.",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    }
-]
-
 logger = logging.getLogger("chat-backend")
 logger.setLevel(getattr(logging, CHAT_LOGGING_LEVEL, logging.INFO))
 logger.propagate = False
@@ -406,12 +284,374 @@ if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
     #)
     logger.addHandler(handler)
 
+
+def parse_optional_positive_int(value: str, *, var_name: str) -> Optional[int]:
+    """Parse optional positive integer env values."""
+    if not value:
+        return None
+    try:
+        num = int(value)
+        if num <= 0:
+            raise ValueError("must be > 0")
+        return num
+    except Exception:
+        logger.warning("⚠️ Ignoring invalid %s=%r (must be a positive integer)", var_name, value)
+        return None
+
+
+def parse_probability(value: str, *, var_name: str, default: float) -> float:
+    """Parse floating-point probability values in the [0, 1] range."""
+    if not value:
+        return default
+    try:
+        prob = float(value)
+    except Exception:
+        logger.warning("⚠️ Ignoring invalid %s=%r (must be a float in [0,1])", var_name, value)
+        return default
+
+    if 0.0 <= prob <= 1.0:
+        return prob
+
+    logger.warning("⚠️ Ignoring invalid %s=%r (must be in [0,1])", var_name, value)
+    return default
+
+
+def parse_num_ctx_by_model(raw: str) -> Dict[str, int]:
+    """
+    Parse OLLAMA_NUM_CTX_BY_MODEL from:
+    'modelA=8192,modelB=16384'
+    """
+    out: Dict[str, int] = {}
+    if not raw:
+        return out
+
+    for part in raw.split(","):
+        entry = part.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            logger.warning("⚠️ Ignoring invalid OLLAMA_NUM_CTX_BY_MODEL entry %r (expected model=num_ctx)", entry)
+            continue
+
+        model, num_ctx_raw = entry.split("=", 1)
+        model = model.strip()
+        num_ctx_raw = num_ctx_raw.strip()
+
+        if not model:
+            logger.warning("⚠️ Ignoring OLLAMA_NUM_CTX_BY_MODEL entry with empty model: %r", entry)
+            continue
+
+        num_ctx = parse_optional_positive_int(num_ctx_raw, var_name="OLLAMA_NUM_CTX_BY_MODEL")
+        if num_ctx is None:
+            logger.warning("⚠️ Ignoring invalid num_ctx for model %r in OLLAMA_NUM_CTX_BY_MODEL", model)
+            continue
+
+        out[model] = num_ctx
+
+    return out
+
+
+def parse_model_alias_by_model(raw: str) -> Dict[str, str]:
+    """
+    Parse OLLAMA_MODEL_ALIAS_BY_MODEL from:
+    'modelA=modelA-8k,modelB=modelB-16k'
+    """
+    out: Dict[str, str] = {}
+    if not raw:
+        return out
+
+    for part in raw.split(","):
+        entry = part.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            logger.warning("⚠️ Ignoring invalid OLLAMA_MODEL_ALIAS_BY_MODEL entry %r (expected model=alias)", entry)
+            continue
+
+        model, alias = entry.split("=", 1)
+        model = model.strip()
+        alias = alias.strip()
+        if not model or not alias:
+            logger.warning("⚠️ Ignoring invalid OLLAMA_MODEL_ALIAS_BY_MODEL entry %r (model/alias empty)", entry)
+            continue
+        out[model] = alias
+
+    return out
+
+
+def normalize_model_name(model: str) -> str:
+    """Normalize common Ollama registry prefixes to a short model name."""
+    m = (model or "").strip()
+    if m.startswith("registry.ollama.ai/library/"):
+        return m[len("registry.ollama.ai/library/"):]
+    return m
+
+
+DEFAULT_NUM_CTX = parse_optional_positive_int(OLLAMA_NUM_CTX, var_name="OLLAMA_NUM_CTX")
+MODEL_NUM_CTX_OVERRIDES = parse_num_ctx_by_model(OLLAMA_NUM_CTX_BY_MODEL)
+MODEL_ALIAS_OVERRIDES = parse_model_alias_by_model(OLLAMA_MODEL_ALIAS_BY_MODEL)
+DOMAIN_KNOWLEDGE_MAX_MATCHES = parse_optional_positive_int(
+    DOMAIN_KNOWLEDGE_MAX_MATCHES_RAW,
+    var_name="DOMAIN_KNOWLEDGE_MAX_MATCHES",
+) or 4
+DOMAIN_KNOWLEDGE_FUZZY_THRESHOLD = parse_probability(
+    DOMAIN_KNOWLEDGE_FUZZY_THRESHOLD_RAW,
+    var_name="DOMAIN_KNOWLEDGE_FUZZY_THRESHOLD",
+    default=0.93,
+)
+
+
+def resolve_num_ctx(model: str) -> Optional[int]:
+    """Resolve per-model num_ctx with fallback to OLLAMA_NUM_CTX."""
+    normalized = normalize_model_name(model)
+    if model in MODEL_NUM_CTX_OVERRIDES:
+        return MODEL_NUM_CTX_OVERRIDES[model]
+    if normalized in MODEL_NUM_CTX_OVERRIDES:
+        return MODEL_NUM_CTX_OVERRIDES[normalized]
+    return DEFAULT_NUM_CTX
+
+
+def resolve_runtime_model(model: str) -> str:
+    """Resolve alias model name for runtime calls if configured."""
+    normalized = normalize_model_name(model)
+    if model in MODEL_ALIAS_OVERRIDES:
+        return MODEL_ALIAS_OVERRIDES[model]
+    if normalized in MODEL_ALIAS_OVERRIDES:
+        return MODEL_ALIAS_OVERRIDES[normalized]
+    return model
+
+
+def resolve_local_path(path_value: str) -> Path:
+    """Resolve relative paths against the backend root directory."""
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return Path(__file__).resolve().parent / path
+
+
+def build_domain_knowledge_resolver() -> Optional[DomainKnowledgeResolver]:
+    """Initialize domain knowledge resolver from configured local source."""
+    if not DOMAIN_KNOWLEDGE_ENABLED:
+        logger.info("🧩 Domain knowledge resolver is disabled via DOMAIN_KNOWLEDGE_ENABLED=0")
+        return None
+
+    source_path = resolve_local_path(DOMAIN_KNOWLEDGE_PATH)
+    provider = JsonDomainTermsProvider(source_path)
+    resolver = DomainKnowledgeResolver(
+        provider,
+        enable_fuzzy=DOMAIN_KNOWLEDGE_ENABLE_FUZZY,
+        fuzzy_threshold=DOMAIN_KNOWLEDGE_FUZZY_THRESHOLD,
+        auto_reload=True,
+    )
+
+    try:
+        resolver.reload(force=True)
+        logger.info(
+            "🧩 Domain knowledge resolver enabled: path=%s max_matches=%s fuzzy=%s threshold=%s",
+            source_path,
+            DOMAIN_KNOWLEDGE_MAX_MATCHES,
+            DOMAIN_KNOWLEDGE_ENABLE_FUZZY,
+            DOMAIN_KNOWLEDGE_FUZZY_THRESHOLD,
+        )
+        return resolver
+    except Exception:
+        logger.exception(
+            "⚠️ Domain knowledge resolver failed to initialize from %s; continuing without it",
+            source_path,
+        )
+        return None
+
+
+def _string_or_none(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _string_or_empty(value: Any) -> str:
+    text = _string_or_none(value)
+    return text if text is not None else ""
+
+
+def _bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def sanitize_history(history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Keep only frontend-supported history items."""
+    sanitized: List[Dict[str, str]] = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role not in ALLOWED_HISTORY_ROLES or not isinstance(content, str):
+            continue
+        sanitized.append({
+            "role": role,
+            "content": content,
+        })
+    return sanitized
+
+
+def text_response_payload(
+    text: str,
+    *,
+    request_id: str,
+    response_type: str = "answer",
+    trace: Optional[list[dict]] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "type": response_type if response_type in RESPONSE_TYPES else "answer",
+        "request_id": request_id,
+        "blocks": [
+            {
+                "kind": "text",
+                "text": text,
+            }
+        ],
+    }
+    if TRACE_ENABLED and trace is not None:
+        payload["trace"] = trace
+    return payload
+
+
+def normalize_blocks(raw_blocks: Any) -> List[Dict[str, Any]]:
+    """Normalize LLM output to the storefront-supported block schema."""
+    if not isinstance(raw_blocks, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for block in raw_blocks:
+        if not isinstance(block, dict):
+            continue
+
+        kind = block.get("kind")
+        if kind == "text":
+            text = _string_or_none(block.get("text"))
+            if text is None:
+                continue
+            normalized.append({"kind": "text", "text": text})
+            continue
+
+        if kind == "info_box":
+            text = _string_or_none(block.get("text"))
+            if text is None:
+                continue
+            normalized.append({
+                "kind": "info_box",
+                "style": block.get("style") if block.get("style") in INFO_BOX_STYLES else "info",
+                "title": _string_or_empty(block.get("title")),
+                "text": text,
+            })
+            continue
+
+        if kind == "product_list":
+            products_out: List[Dict[str, str]] = []
+            for product in block.get("products") or []:
+                if not isinstance(product, dict):
+                    continue
+                normalized_product: Dict[str, str] = {}
+                for key in ("id", "name", "productNumber", "purchaseUnit", "unitShortCode", "price"):
+                    value = _string_or_none(product.get(key))
+                    if value is not None:
+                        normalized_product[key] = value
+                if normalized_product:
+                    products_out.append(normalized_product)
+
+            normalized.append({
+                "kind": "product_list",
+                "title": _string_or_empty(block.get("title")),
+                "products": products_out,
+            })
+            continue
+
+        if kind == "formular":
+            fields_out: List[Dict[str, Any]] = []
+            for field in block.get("fields") or []:
+                if not isinstance(field, dict):
+                    continue
+
+                field_key = _string_or_none(field.get("key"))
+                field_label = _string_or_none(field.get("label"))
+                field_type = _string_or_none(field.get("type")) or "text"
+                if field_key is None or field_label is None:
+                    continue
+
+                fields_out.append({
+                    "key": field_key,
+                    "label": field_label,
+                    "type": field_type if field_type in FORM_FIELD_TYPES else "text",
+                    "placeholder": _string_or_none(field.get("placeholder")),
+                    "required": _bool_value(field.get("required")),
+                    "value": _string_or_none(field.get("value")),
+                })
+
+            normalized.append({
+                "kind": "formular",
+                "title": _string_or_empty(block.get("title")),
+                "reason": _string_or_empty(block.get("reason")),
+                "submitLabel": _string_or_empty(block.get("submitLabel")),
+                "fields": fields_out,
+            })
+
+    return normalized
+
+
+def normalize_chat_reply(reply_text: str, *, request_id: str, trace: Optional[list[dict]] = None) -> Dict[str, Any]:
+    """Accept supported frontend response shapes and normalize to blocks."""
+    raw = (reply_text or "").strip()
+
+    try:
+        data = json.loads(raw)
+    except Exception:
+        logger.warning("⚠️ LLM reply was not valid JSON, sending text fallback. raw=%r", raw)
+        return text_response_payload(raw, request_id=request_id, trace=trace)
+
+    if not isinstance(data, dict):
+        logger.warning("⚠️ LLM reply JSON was not an object, sending text fallback. raw=%r", raw)
+        return text_response_payload(raw, request_id=request_id, trace=trace)
+
+    response_type = data.get("type") if data.get("type") in RESPONSE_TYPES else "answer"
+
+    blocks = normalize_blocks(data.get("blocks"))
+    if blocks:
+        payload: Dict[str, Any] = {
+            "type": response_type,
+            "request_id": request_id,
+            "blocks": blocks,
+        }
+        if TRACE_ENABLED and trace is not None:
+            payload["trace"] = trace
+        return payload
+
+    fallback_text = _string_or_none(data.get("reply")) or _string_or_none(data.get("message"))
+    if fallback_text is not None:
+        return text_response_payload(
+            fallback_text,
+            request_id=request_id,
+            response_type=response_type,
+            trace=trace,
+        )
+
+    logger.warning("⚠️ LLM reply JSON had no supported fields, sending text fallback. raw=%r", raw)
+    return text_response_payload(raw, request_id=request_id, response_type=response_type, trace=trace)
+
+
 class ChatIn(BaseModel):
     """Input model for /chat endpoint."""
+    model_config = ConfigDict(extra="ignore")
+
     message: str
-    history: Optional[List[Dict[str, Any]]] = []
+    history: List[Dict[str, Any]] = Field(default_factory=list)
     model: str
-    client: Dict[str, str] = {}
+    client: Dict[str, Any] = Field(default_factory=dict)
 
 class Phase(Enum):
     """Phases of the chat_with_tools loop."""
@@ -487,24 +727,56 @@ async def lifespan(app: FastAPI):
 
 client = OpenAI(base_url=OLLAMA_BASE_URL, api_key=OLLAMA_API_KEY)
 mcp_cache = McpSessionCache(MCP_URL)
+domain_knowledge_resolver = build_domain_knowledge_resolver()
 
 # CORS
 cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",")]
+cors_allow_origin_regex = CORS_ORIGIN_REGEX or (r"https?://.*" if cors_origins == ["*"] else None)
 app = FastAPI(title="Shopware Chat Backend (Ollama + MCP)", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins if cors_origins != ["*"] else ["*"],
+    allow_origins=[] if cors_origins == ["*"] else cors_origins,
+    allow_origin_regex=cors_allow_origin_regex,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["POST", "OPTIONS", "GET"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
+    detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
+    return JSONResponse(status_code=exc.status_code, content={"message": detail})
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "message": "Invalid request body",
+            "details": exc.errors(),
+        },
+    )
+
 
 @app.get("/healthz")
 def health():
     """
     Check endpoint to verify that the service is running.
     """
-    return {"status": "ok", "model": OLLAMA_MODEL}
+    return {
+        "status": "ok",
+        "model": OLLAMA_MODEL,
+        "num_ctx_default": DEFAULT_NUM_CTX,
+        "num_ctx_by_model": MODEL_NUM_CTX_OVERRIDES,
+        "model_alias_by_model": MODEL_ALIAS_OVERRIDES,
+        "domain_knowledge_enabled": domain_knowledge_resolver is not None,
+        "domain_knowledge_path": str(resolve_local_path(DOMAIN_KNOWLEDGE_PATH)),
+        "domain_knowledge_max_matches": DOMAIN_KNOWLEDGE_MAX_MATCHES,
+        "domain_knowledge_fuzzy": DOMAIN_KNOWLEDGE_ENABLE_FUZZY,
+        "domain_knowledge_fuzzy_threshold": DOMAIN_KNOWLEDGE_FUZZY_THRESHOLD,
+    }
 
 
 @app.post("/chat")
@@ -521,18 +793,6 @@ async def chat(in_: ChatIn, request: Request):
 
     trace_cleanup()
 
-    """
-    Verify client token (if provided) and extract context
-    """
-    ctx_payload = None
-    try:
-        token = (in_.client or {}).get("contextToken", "")
-        ctx_payload = verify(token, CHAT_AUTH_SECRET)
-    except Exception:
-        ctx_payload = None
-
-    user_logged_in = bool(ctx_payload and ctx_payload.get("loggedIn"))
-
     request_id = request.headers.get("X-Request-Id") or str(time.time_ns())
     trace: list[dict] = []
     def trace_add(kind: str, data: dict) -> None:
@@ -543,11 +803,9 @@ async def chat(in_: ChatIn, request: Request):
                 "data": data,
             })
 
-    """ FORMAT_PROMPT and TOOLS for now all public"""
-
-    FORMAT_PROMPT = FORMAT_PROMPT_PUBLIC
-    TOOLS = TOOLS_PUBLIC
-
+    # contextToken is accepted from the storefront contract but intentionally ignored.
+    format_prompt = FORMAT_PROMPT_PUBLIC
+    tools = TOOLS_PUBLIC
 
     if CHAT_DRY_RUN:
         return {
@@ -555,12 +813,34 @@ async def chat(in_: ChatIn, request: Request):
             "blocks": [
                 {"kind": "info_box", "style": "info", "title": "Dry-Run", "text": "LLM call skipped (CHAT_DRY_RUN=1)."},
                 {"kind": "text", "text": f"Received: {in_.message}"},
-                {"kind": "text", "text": f"User logged in: {bool(ctx_payload and ctx_payload.get('loggedIn'))}"},
+                {"kind": "text", "text": "Private tool access is disabled."},
             ],
         }
 
     logger.info("💬 Received chat request: %s", in_.message)
     logger.debug("💬 Full chat request:\n%s", in_.model_dump_json(ensure_ascii=False, indent=2))
+
+    resolved_domain_matches = []
+    domain_knowledge_prompt = ""
+    if domain_knowledge_resolver is not None:
+        resolved_domain_matches = domain_knowledge_resolver.resolve_message(
+            in_.message,
+            max_matches=DOMAIN_KNOWLEDGE_MAX_MATCHES,
+        )
+        if resolved_domain_matches:
+            domain_knowledge_prompt = build_domain_knowledge_prompt_block(resolved_domain_matches)
+            logger.info("🧩 Domain knowledge matched entries: %s", len(resolved_domain_matches))
+            logger.debug(
+                "🧩 Domain knowledge matches:\n%s",
+                json.dumps([match.to_dict() for match in resolved_domain_matches], ensure_ascii=False, indent=2),
+            )
+            trace_add(
+                "domain_knowledge_matches",
+                {
+                    "request_id": request_id,
+                    "matches": [match.to_dict() for match in resolved_domain_matches],
+                },
+            )
 
     """
     Prepare messages for the LLM: system prompt + history + new user message.
@@ -568,11 +848,13 @@ async def chat(in_: ChatIn, request: Request):
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": TOOL_PROMPT},
     ]
+    if domain_knowledge_prompt:
+        messages.append({"role": "system", "content": domain_knowledge_prompt})
 
     """
     Append history from the frontend (if you send it there).
     """
-    for h in in_.history or []:
+    for h in sanitize_history(in_.history):
         messages.append(h)
 
     """
@@ -587,75 +869,43 @@ async def chat(in_: ChatIn, request: Request):
     """
     requested_model = (in_.model or "").strip()
     effective_model = requested_model if requested_model else OLLAMA_MODEL
+    runtime_model = resolve_runtime_model(effective_model)
+    effective_num_ctx = resolve_num_ctx(effective_model)
+    logger.info(
+        "🧠 Effective model=%s runtime_model=%s num_ctx=%s",
+        effective_model,
+        runtime_model,
+        effective_num_ctx if effective_num_ctx is not None else "default",
+    )
+    if effective_num_ctx is not None and runtime_model == effective_model:
+        logger.debug(
+            "ℹ️ num_ctx=%s configured for %s; OpenAI-compatible /v1 endpoint may keep model default unless using an alias model with baked PARAMETER num_ctx",
+            effective_num_ctx,
+            effective_model,
+        )
 
     """
     Call LLM (with tools); implementation is in chat_with_tools(...)
     """
-    reply_text = await chat_with_tools(
-        cast(List[ChatCompletionMessageParam], messages),
-        model=effective_model,
-        tools=TOOLS,
-        format_prompt=FORMAT_PROMPT,
-        trace_add=trace_add,
-        request_id=request_id
-    )
-
-    """
-    Try to interpret the LLM reply as JSON according to our schema
-    """
     try:
-        data = json.loads(reply_text.strip())
-
-        """
-        Minimal validity check: it must be a dict with "blocks"
-        """
-        if not isinstance(data, dict):
-            raise ValueError("LLM reply is not a JSON object")
-        if "blocks" not in data:
-            raise ValueError("LLM reply has no 'blocks' field")
-        
-        data["request_id"] = request_id
-
-        if TRACE_ENABLED:
-            TRACE_STORE[request_id] = trace
-            TRACE_CREATED[request_id] = time.time()
-            # optional: also return it inline for eval runs
-            data["trace"] = trace
-
-        """
-        Here you could optionally validate more strictly (type, kinds, etc.)
-        """
-        return data
-
-    except Exception as exc:
-        """
-        If parsing fails, log and provide a fallback
-        """
-        logger.warning(
-            "⚠️ LLM reply was not valid JSON, sending fallback. Error=%s, raw=%r",
-            exc,
-            reply_text.strip(),
+        reply_text = await chat_with_tools(
+            cast(List[ChatCompletionMessageParam], messages),
+            model=runtime_model,
+            tools=tools,
+            format_prompt=format_prompt,
+            num_ctx=effective_num_ctx,
+            trace_add=trace_add,
+            request_id=request_id
         )
-
-        """
-        Fallback: we pack the original text from the LLM into a simple text block
-        """
-        fallback = {
-            "type": "answer",
-            "request_id": request_id,
-            "blocks": [
-                {
-                    "kind": "text",
-                    "text": str(reply_text.strip()),
-                }
-            ],
-        }
-
         if TRACE_ENABLED:
             TRACE_STORE[request_id] = trace
             TRACE_CREATED[request_id] = time.time()
-            fallback["trace"] = trace
-        return fallback
+        return normalize_chat_reply(reply_text, request_id=request_id, trace=trace)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("❌ Chat backend failed for request %s", request_id)
+        raise HTTPException(status_code=502, detail=f"Chat backend failed: {exc}") from exc
 
 
 @app.get("/trace/{request_id}")
@@ -718,6 +968,7 @@ async def chat_with_tools(
         messages: list[ChatCompletionMessageParam], 
         model: str, tools: list[ChatCompletionToolUnionParam], 
         format_prompt: str, 
+        num_ctx: Optional[int] = None,
         trace_add: Optional[Callable[[str, dict], None]] = None,
         request_id: Optional[str] = None,
         ) -> str:
@@ -732,6 +983,8 @@ async def chat_with_tools(
     :type tools: list[ChatCompletionToolUnionParam]
     :param format_prompt: Prompt to use for final formatting
     :type format_prompt: str
+    :param num_ctx: Optional Ollama context size for this request
+    :type num_ctx: Optional[int]
     :param trace_add: Optional function to add trace events
     :type trace_add: Optional[Callable[[str, dict], None]]
     :param request_id: Optional request ID for tracing
@@ -760,15 +1013,20 @@ async def chat_with_tools(
             "has_tools": True,
             "tool_choice": "auto",
             "temperature": 0.2,
+            "num_ctx": num_ctx,
         })
 
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            temperature=0.2,
-        )
+        request_kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": 0.2,
+        }
+        if num_ctx is not None:
+            request_kwargs["extra_body"] = {"options": {"num_ctx": num_ctx}}
+
+        resp = client.chat.completions.create(**request_kwargs)
 
         dt_ms = int((time.perf_counter() - t0) * 1000)
         _trace("ollama_response", {
@@ -850,16 +1108,21 @@ async def chat_with_tools(
         "has_tools": False,
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
+        "num_ctx": num_ctx,
     })
 
-    final_resp = client.chat.completions.create(
-        model=model,
-        messages=final_messages,
-        temperature=0.2,
-        response_format={
+    final_request_kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": final_messages,
+        "temperature": 0.2,
+        "response_format": {
             "type": "json_object"
-        }
-    )
+        },
+    }
+    if num_ctx is not None:
+        final_request_kwargs["extra_body"] = {"options": {"num_ctx": num_ctx}}
+
+    final_resp = client.chat.completions.create(**final_request_kwargs)
 
     dt_ms = int((time.perf_counter() - t0) * 1000)
     _trace("ollama_response", {
@@ -948,58 +1211,3 @@ async def call_mcp_tool(
 
     # 3) Last resort
     return {"text": str(result)}
-
-
-def b64_decode(s: str) -> bytes:
-    """
-    Helper function to decode base64 URL-safe strings.
-    
-    :param s: Base64 URL-safe encoded string
-    :type s: str
-    :return: Decoded bytes
-    :rtype: bytes
-    """
-    s += "="* (-len(s) % 4)
-    return base64.urlsafe_b64decode(s.encode("utf-8"))
-
-
-def verify(token: str, secret: str) -> Optional[Dict[str, Any]]:
-    """
-    Helper function to verify a JWT-like token using HMAC SHA256.
-    
-    :param token: JWT-like token string
-    :type token: str
-    :param secret: Secret key for HMAC verification
-    :type secret: str
-    :return: Decoded payload if verification succeeds, otherwise None
-    :rtype: Dict[str, Any] | None
-    """
-    if not token or not secret:
-        return None
-
-    parts = token.split(".")
-    if len(parts) != 3:
-        return None
-
-    h_b64, p_b64, sig_b64 = parts
-    signing_input = f"{h_b64}.{p_b64}".encode("utf-8")
-
-    expected = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
-    try:
-        got = b64_decode(sig_b64)
-    except Exception:
-        return None
-
-    if not hmac.compare_digest(expected, got):
-        return None
-
-    try:
-        payload = json.loads(b64_decode(p_b64).decode("utf-8"))
-    except Exception:
-        return None
-
-    exp = payload.get("exp")
-    if not isinstance(exp, int) or int(time.time()) > exp:
-        return None
-
-    return payload
