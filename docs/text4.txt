@@ -1,0 +1,34 @@
+Zu Artikeln:
+    - Neue Artikel eingelesen (bis auf 16)
+    - PDFs können nun angehängt werden
+    - Preise nur für angemeldete Nutzer sichtbar (auf Produktseite, in Suchleiste)
+    - Frage dazu: Wie mit dem Warenkorb umgehen? Nur für angemeldete?
+
+Zu Sage:
+    - Gibt bereits Lösungen, sind aber kommerziell und teilweise teuer
+    - Evtl. also eigene Lösung entwerfen
+
+Zu Kunden:
+    - Login muss jetzt erst verifiziert werden, dann kann account benutzt werden
+
+Änderungen:
+    - Warenkorb nur für angemeldete Nutzer
+    - Mailverkehr zu Kundenkontoerstellung regeln
+    - Nettopreise sind "Mittlerer EK" in Excel
+    - Netzzugriff auf Shop freischalten 
+    - Import von PDF-Datenblättern (wenn wir wissen, welches Format die haben)
+
+Vorschläge:
+    - Puppe schlägt Gespräch mit Felix Herrmann von Olyro
+    - Puppe macht sich Gedanken wegen Bots -> deswegen Felix ansprechen, der weiß da mehr
+    - Frau Sander schlägt vor, Domain bei Strato, dewswegen vll. behalten?
+
+Zu langfristigem Betrieb:
+    - Grundinformationen zusammenstellen
+    Anforderungen an Server:
+        - Docker
+        - Import bzw. andere Profile evtl. exportierbar aus Shopware?
+        - Kundenpasswort importieren? Oder wie läuft das? z.B. mit Initialpasswort (und ob das Ändern enforced wird)
+    Anforderungen Zusammenschreiben! Ist Teil der BA, kriegt aber auch Felix Herrmann (wegen Umsetzung)
+        - Kapitel: "Einrichten des Systems auf einem neuen Server"
+        -> Schritte abfrühstücken und mit Screenshots erklären

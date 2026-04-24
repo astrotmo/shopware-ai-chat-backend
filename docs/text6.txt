@@ -1,0 +1,26 @@
+Analyse Bestellungen mit inaktiven Artikeln:
+    - Issue: Fehlende Mail Templates
+    - Artikel inaktiv -> "Erneut Bestellen" führt zu "Produkt nicht gefunden" im Warenkorb, sonst aber keine Anzeige
+    - Neue Homepage bietet dann Ort, wo potentielle Liste angezeigt werden kann.
+
+Herr Ott zu Artikeln:
+    - Inaktive Artikel werden meist nicht so schnell wieder nachgekauft, wenn ein Artikel irgendwann mal inaktiv gesetzt wird
+    - Vorschlag: So lassen, im Warenkorb wird angezeigt, dass Produkte fehlen
+
+Zu den News:
+    - Kacheln mögl. eine dazu und dahin die news zu machen, damit Bild nicht im Hintergrund
+
+Zu Schnittstelle:
+    - Maniac Seller
+
+Zu Rabatten:
+    - Sowohl Prozentsätze auf bestimmte Artikelgruppen
+    - Als auch direkt Beträge bzw. Kilopreise
+
+Email:
+    - Versand aktiv stellen
+    - info@neller-bamberg.de
+    - Templates hinzufügen
+
+Individuelle Preise:
+    - So viele verschiedene Preislisten sinnvoll? Oder wie wäre das am besten

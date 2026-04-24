@@ -1,0 +1,12 @@
+13.03.2026
+Zu Artikel:
+    - Herr Ott schickt neue List
+    - Preisanzeige NUR Netto im Shop, Steuer kommt am Ende bei Rechnungserstellung
+    - Inaktive werden nicht importiert
+Zu Sage:
+    - Nach Datenaustausch schauen (Sage 100, Basisversion, potentiell Upgrade auf Premium)
+    - Neller sprechen auch ihre WWS-Leute an
+    - Wie funktioniert der Datenaustausch
+Zu Nährwerte:
+    - Beschreibung hinzufügen (Nährwerte, Sage kann Anhänge hinzufügen)
+    - z.B. PDFs bei Artikel (Herr Ott schickt)

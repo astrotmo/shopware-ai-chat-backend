@@ -1,0 +1,31 @@
+Herr Ott:
+    > 19% vs. 7% Steuersätze nochmal prüfen
+    > Und nur aktive Artikel anzeigen
+    > Daher Artikel nochmal importieren, Neller schickt Kategorien etc.
+
+Thematik Schlotfeger:
+    > Artikel nicht richtig gesucht - nochmal prüfen
+
+Thematik Email:
+    > Gucken, an wen Mails geschickt werden
+    > Weiterleitung etc.
+
+Thematik Komponenten:
+    > Gerätespezifikation schickt Herr Ott
+
+Thematik Testphase:
+    > Je nach Spezifikation dann Test mit zwei Phasen (mit und ohne LLM)
+    > Nur angemeldete Nutzer könnten Chatbot nutzen
+
+Thematik Routing:
+    > Neue Änderungen in Robustness könnten Routing beeinflussen
+
+1. Schritt: Ich fixe Routing und Artikel
+2. Schritt: Neller schaut Kategorien etc. durch und schickt auch Serverspezifikation
+3. Schritt: Shopware auf Olyro hosten, LLM evtl. auch
+
+Antworten:
+    Zu Artikel - Werden gefixt gerade (noch nicht fertig. Sind aber trotzdem 2550 aktive Artikel)
+    Zu Steuersätze - Waren falsch zugeweisen, und Berechnung Netto/Brutto falsch
+    Zu Schlotfeger - Domain Terms hinzugefügt, werden vor Chatrequest ausgewertet und hinzugefügt
+    Zu Mail - Zeige wo man Mail-Templates einstellt, Mail-Adresse ändernt etc.

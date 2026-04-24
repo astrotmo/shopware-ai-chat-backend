@@ -1,0 +1,40 @@
+Antwort Frau Sander / Herr Ott:
+- Viele verschiedene Artikel, von daher Aufteilung in Kategorien sinnvoll
+- Bei Updates: Änderungen im SAGE WWS -> Einlesen neuer Daten aus CSV (z.B. nach Hersteller)
+- Einteilung Lagerartikel - Bestellartikel (-> Attribut hinzufügen)
+- Können Bestelllisten angelegt werden? (Siehe EMail Anhänge von Frau Sander)
+    > Mengen von letzter Woche -> Kunden können Mengen schätzen
+    > Im Sinne von Amazons "nochmal bestellen"
+- Vom WebShop in SAGE Bestellungen importieren
+- Bei unangemeldeten Nutzer auch im Shop kein Preis
+
+Prof. Puppe:
+- Redundanzen einbauen, Robust gegen Bots
+
+Für 06.03.2026:
+Zu Updates:
+    Würde über Middleware laufen:
+        Sage ERP
+            ↓ Export
+        CSV / API
+            ↓
+        Middleware / Importservice (z.B. maniacSeller, Omniseller, Custom)
+            ↓
+        Shopware API
+
+        -> Könnte automatisch oder auf click funktionieren (SAGE als Master)
+Zu Einteilung:
+    Kann über Custom Field hinzugefügt werden
+Zu Bestellliste:
+    Kunden können Bestellungen einsehen und wiederholen
+Zu Bestellimport in SAGE:
+    Würde auch über Middleware laufen:
+        Kunde bestellt im Shopware
+            ↓
+        Shopware Order API
+            ↓
+        Middleware
+            ↓
+        SAGE erzeugt Auftrag
+Zu Preisen:
+    Wurde angepasst.

@@ -1,0 +1,32 @@
+Import/Export:
+    - Preise in separater Datei?
+    - Müssen Artikel zuordnern, Frage ist wie?
+    - Artikel fallen weg oder kommen hinzu
+    - Dementsprechend muss Import/Export angepasst werden
+    - Oder Artikel inaktiv setzen
+    - Herr Ott gibt Auskunft, ob und wie mit inaktiven Artikeln verfahren wird
+
+Zu Artikeln:
+    - Wenn Artikel inaktiv gesetzt wird, was passiert bei "Bestellung wiederholen"?
+    - Oder Artikel ganz löschen und Disclaimer anzeigen o.Ä.
+    - Ausprobieren, was da Shopware macht, bzw. anbietet
+    - Oder Liste erstellen, die nicht mehr verfügbare Artikel anzeigt und auf die man verweist
+
+Also zu klären:
+    - Preisänderung
+    - Artikel kommen dazu oder fallen weg
+    - Wie verhalten sich Bestellungen dementsprechend
+
+Diese Prozesse sowohl aus technischer, als auch aus Shopbetreiber Sicht in die Ausarbeitung mit rein nehmen.
+
+Nächster Termin 10.04.2026 10 Uhr
+
+Zur Anforderungen:
+    - Ein Dokument zu Anforderungen an den Shop
+    - Ein Dokument zu Anforderungen an das LLM
+    - Also Schritte auftrennen - zwei verschiedene Anforderungen für Shop und LLM (da evtl. verschiedene Provider)
+    - Auch die Löschung dazu nehmen
+
+Ausarbeitung:
+    - Mit Anforderungen anfangen, welche das System hat bzgl. Wartung und Produktdatenblättern etc.
+    - Was das LLM können soll als Anforderung
