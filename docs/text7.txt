@@ -1,0 +1,23 @@
+Preise raus aus dem Webshop, Neller macht Preise dann mit Kunden aus
+
+Stand wegen Konnektor - Herr Groß hat das angeleitet, 
+
+Testen wir aus, wenn BA fertig
+
+- Herr Ott stellt von kg auf andere Mengeneinheit um (Sack)
+
+- Im Warenkorb auch Netto anzeigen, Gewerbekunden rechnen immer in Netto, Brutto kommt unten dazu
+
+- Neller Email SMTP Zugang wird erfragt
+
+Vorschlag Puppe:
+
+- Bis zu dem Zeitpunkt wo Schnittstelle verfügbar ist, Kunden testen ohne Preise oder ggf. Standardpreise
+
+- Kunden je nach größe oder Alter der Chefs, positiv oder negativ
+
+Also jetzt eine Version ohne Preise, ansonsten ich lasse PC an, Puppe fragt Uni für Server
+
+Anleitung für Neller für Ankündigungen und Infos zu Bestellungen usw. (für Praxisbetrieb - Vorab schonmal schicken)
+
+Nächster Termin 28.04. 11:00

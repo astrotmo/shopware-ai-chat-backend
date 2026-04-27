@@ -1,0 +1,6 @@
+Zu Änderungen:
+    - Preise können an/aus geschaltet werden (uvm. in der Konfiguration der Plugins und Themes)
+
+    - Für Umstellung auf Sack brauchen wir dann neue Artikeldaten
+    
+    - Preise im Warenkorb nun auch abschaltbar, falls angezeigt werden soll, werden Netto & Brutto angezeigt
