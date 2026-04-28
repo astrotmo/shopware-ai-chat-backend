@@ -1,0 +1,18 @@
+28.04.26
+	- Datumsanzeige bei Ankündigungen noch falsch
+	- "Zahlungspflichtig bestellen" ändern zu "Bestellung aufgeben" o.Ä.
+	- AGBs deaktivieren
+	- Preisanzeige in Bestellbestätigung / Rechnung deaktivieren
+	- Versandkosten nur bei Bestellwert unter 150€ Netto
+	- Kunden bestellen ca. bis zu 40 Posten (manchmal auch nur sehr wenige) aber Posten ~ Preise nicht direkt proportional
+	- Im Schnitt ca. 10+ Posten pro Bestellung
+	- Anleitung für Test / für Herrn Ott
+	- Bestätigungsmail usw. an info@neller-bamberg.de und sepper.ott@gmx.de für Test-Konto
+
+Zu Serverbetrieb:
+	- Entweder Olyro (aber ohne Chat-Bot wegen fehlender Grafikkarte)
+	- Oder gleich über Projekt <- So machen wirs (FA Neller)
+	- Test: Ich fixe (heute) - Schreibe Herrn Ott - Herr Ott geht zu Eisdiele (machen Zeitpunkt aus)
+	- Mögl. Mittwoch Abend oder Samstag
+
+Nächster Termin dann wenn Test durchgeführt (peilen 13.05 10 Uhr)
