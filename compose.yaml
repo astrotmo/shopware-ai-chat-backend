@@ -4,6 +4,11 @@ services:
     image: ollama/ollama:0.17.1-rc2
     environment:
       - OLLAMA_DEBUG=1
+      - OLLAMA_NUM_CTX=16384
+      - OLLAMA_CONTEXT_LENGTH=16384
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_FLASH_ATTENTION=1
     ports:
       - "11434:11434"
     volumes:
