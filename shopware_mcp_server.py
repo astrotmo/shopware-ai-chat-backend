@@ -1,3 +1,15 @@
+"""Streamable-HTTP MCP server exposing a narrow Shopware catalogue view.
+
+The chat service is this module's MCP client.  Tool implementations authenticate
+to Shopware's Admin API with OAuth client credentials, then normalize responses
+before returning them to the model.  No price, stock, delivery, customer, or
+order field is exposed by the product normalizer.
+
+FastMCP listens on all interfaces at port 8005 and this module adds no transport
+authentication of its own.  Deployment networking is therefore part of the
+security boundary.
+"""
+
 import logging
 import os, time, argparse, httpx
 
@@ -24,6 +36,8 @@ SHOPWARE_CLIENT_SECRET = os.getenv("SHOPWARE_CLIENT_SECRET", "")
 MCP_LOGGING_LEVEL = os.getenv("MCP_LOGGING_LEVEL", "info").upper()
 
 if not SHOPWARE_BASE_URL or not SHOPWARE_CLIENT_ID or not SHOPWARE_CLIENT_SECRET:
+    # Fail before opening the MCP listener: every current tool depends on the
+    # same Admin API integration credentials.
     raise RuntimeError("Missing SHOPWARE_BASE_URL, SHOPWARE_CLIENT_ID or SHOPWARE_CLIENT_SECRET in .env")
 
 logger = logging.getLogger("mcp-server")
@@ -37,14 +51,17 @@ if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
     logger.addHandler(handler)
 
 mcp = FastMCP("shopware-products-mcp", host="0.0.0.0", port=8005)
+# Process-local bearer cache.  It is intentionally never returned in a tool
+# result; a container restart or process restart clears it.
 _token_cache = {"access_token": None, "exp": 0}
 
 async def get_access_token() -> str:
-    """
-    Get OAuth2 access token from Shopware, with simple caching.
-    
-    :return: Access token string
-    :rtype: str
+    """Return a cached Shopware client-credentials access token.
+
+    The token is reused until 30 seconds before its advertised expiry.  A
+    missing ``expires_in`` is treated as 600 seconds.  Refreshes use a
+    ten-second HTTP timeout; non-success responses propagate through MCP.
+    There is no refresh lock or special 401 retry in the current cache.
     """
     now = int(time.time())
     if _token_cache["access_token"] and now < _token_cache["exp"] - 30:
@@ -65,12 +82,7 @@ async def get_access_token() -> str:
     return _token_cache["access_token"]
 
 async def _auth_headers() -> Dict[str, str]:
-    """
-    Get authorization headers for Shopware API requests.
-    
-    :return: Headers including the Bearer token for authorization
-    :rtype: Dict[str, str]
-    """
+    """Build JSON Admin API headers without exposing them to MCP callers."""
     token = await get_access_token()
     return {
         "Authorization": f"Bearer {token}",
@@ -79,15 +91,11 @@ async def _auth_headers() -> Dict[str, str]:
     }
 
 async def sw_search(resource: str, criteria: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Shopware search API call.
-    
-    :param resource: Resource to search (e.g., "product")
-    :type resource: str
-    :param criteria: Search criteria as a dictionary
-    :type criteria: Dict[str, Any]
-    :return: Search results as a dictionary
-    :rtype: Dict[str, Any]
+    """POST criteria to ``/api/search/{resource}`` with a 15-second timeout.
+
+    This is the Shopware Admin API, not a Store API request in a
+    ``SalesChannelContext``.  Visibility and customer-specific pricing are
+    therefore not implicitly enforced by this helper.
     """
     url = f"{SHOPWARE_BASE_URL}/api/search/{resource}"
     async with httpx.AsyncClient(timeout=15) as client:
@@ -96,15 +104,9 @@ async def sw_search(resource: str, criteria: Dict[str, Any]) -> Dict[str, Any]:
         return resp.json()
 
 async def sw_get(resource: str, id_: str) -> Dict[str, Any]:
-    """
-    Shopware get API call.
-    
-    :param resource: Resource to get (e.g., "product")
-    :type resource: str
-    :param id_: ID of the resource
-    :type id_: str
-    :return: Resource data as a dictionary
-    :rtype: Dict[str, Any]
+    """GET one Admin API entity from ``/api/{resource}/{id}``.
+
+    Callers must normalize the result before crossing the MCP/model boundary.
     """
     url = f"{SHOPWARE_BASE_URL}/api/{resource}/{id_}"
     async with httpx.AsyncClient(timeout=15) as client:
@@ -113,13 +115,11 @@ async def sw_get(resource: str, id_: str) -> Dict[str, Any]:
         return resp.json()
 
 def _norm_product(p: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Normalize a product dictionary from Shopware API to a simplified format.
+    """Reduce an Admin API product to the public model-facing field set.
 
-    :param p: Raw product data from Shopware API
-    :type p: Dict[str, Any]
-    :return: Normalized product data
-    :rtype: Dict[str, Any]
+    Translated names take precedence.  The allowed output is ``id``, ``name``,
+    ``productNumber``, ``purchaseUnit``, ``unitShortCode``, and ``unitName``;
+    notably it contains no price, stock, visibility, or customer data.
     """
     t = p.get("translated") or {}
     name = t.get("name") or p.get("name")
@@ -138,14 +138,7 @@ def _norm_product(p: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 def _norm_category(c: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Normalize a category dictionary from Shopware API to a simplified format.
-
-    :param c: Raw category data from Shopware API
-    :type c: Dict[str, Any]
-    :return: Normalized category data
-    :rtype: Dict[str, Any]
-    """
+    """Reduce an Admin API category to identity, hierarchy, and active state."""
     t = c.get("translated") or {}
     name = t.get("name") or c.get("name")
     return {
@@ -167,6 +160,9 @@ async def search_products_public(query: str, limit: int = 10, locale: str = DEFA
     :return: Dictionary with list of products and count
     :rtype: Dict[str, Any]
     """
+    # ``locale`` is part of the MCP signature but is not forwarded to
+    # Shopware.  No active, visibility, or sales-channel filter is added, and
+    # ``count`` below describes returned items rather than total hits.
     lim = max(1, min(int(limit), 100))
     criteria = {
         "limit": lim,
@@ -195,6 +191,8 @@ async def get_product_by_id_public(id: str, locale: str = DEFAULT_LOCALE):
     :return: Normalized product data or error message
     :rtype: Dict[str, Any]
     """
+    # UUID syntax is not validated before constructing the Admin API URL, and
+    # the accepted ``locale`` is not forwarded.
     res = await sw_get("product", id)
     p = res.get("data") if isinstance(res, dict) and "data" in res else res
     if not p:
@@ -219,6 +217,8 @@ async def get_product_by_number_public(product_number: str, limit: int = 1, loca
     :return: Dictionary with list of products and count
     :rtype: Dict[str, Any]
     """
+    # The hard-coded schema in app.py omits ``limit`` even though the MCP
+    # function accepts it.  ``locale`` is accepted but not forwarded.
     lim = max(1, min(int(limit), 10))
     criteria = {
         "limit": lim,
@@ -247,6 +247,9 @@ async def list_categories(parent_id: Optional[str] = None, limit: int = 50, loca
     :return: Dictionary with list of categories and count
     :rtype: Dict[str, Any]
     """
+    # The hard-coded schema in app.py advertises no arguments, so model-selected
+    # calls normally use these defaults.  Active state is returned but not
+    # filtered, and ``locale`` is not forwarded.
     lim = max(1, min(int(limit), 100))
     filters: List[Dict[str, Any]] = []
     if parent_id:
@@ -267,5 +270,6 @@ async def list_categories(parent_id: Optional[str] = None, limit: int = 50, loca
     return result
 
 if __name__ == "__main__":
-    # Run MCP with streamable HTTP Transport
+    # Compose runs this path directly; the chat client connects to /mcp using
+    # MCP's streamable HTTP transport.
     mcp.run(transport="streamable-http", mount_path="/mcp")

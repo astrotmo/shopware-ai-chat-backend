@@ -1,3 +1,16 @@
+"""FastAPI gateway for the public AICA storefront chat.
+
+The module is the boundary between the browser/Shopware chat contract and
+two local services: Ollama's OpenAI-compatible API and the Shopware MCP
+server.  It deliberately exposes only public catalogue tools.  The opaque
+``client`` object, including any Shopware context token, is accepted for
+contract compatibility but is not an authorization input.
+
+Configuration and the long-lived clients are initialized when Uvicorn
+imports ``app:app``.  Model output is untrusted at this boundary and is
+reduced to the storefront block shapes by :func:`normalize_chat_reply`.
+"""
+
 import os, json, logging, asyncio, time
 from typing import Any, Callable, Dict, List, Optional, cast
 from contextlib import asynccontextmanager
@@ -450,7 +463,11 @@ if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
 
 
 def parse_optional_positive_int(value: str, *, var_name: str) -> Optional[int]:
-    """Parse optional positive integer env values."""
+    """Return a positive integer or ``None`` for an empty/invalid env value.
+
+    Invalid values are intentionally non-fatal: startup logs a warning and
+    lets the caller use its documented fallback.
+    """
     if not value:
         return None
     try:
@@ -464,7 +481,7 @@ def parse_optional_positive_int(value: str, *, var_name: str) -> Optional[int]:
 
 
 def parse_probability(value: str, *, var_name: str, default: float) -> float:
-    """Parse floating-point probability values in the [0, 1] range."""
+    """Parse an inclusive ``[0, 1]`` probability, falling back on bad input."""
     if not value:
         return default
     try:
@@ -481,9 +498,11 @@ def parse_probability(value: str, *, var_name: str, default: float) -> float:
 
 
 def parse_num_ctx_by_model(raw: str) -> Dict[str, int]:
-    """
-    Parse OLLAMA_NUM_CTX_BY_MODEL from:
-    'modelA=8192,modelB=16384'
+    """Parse comma-separated ``model=num_ctx`` overrides.
+
+    Malformed entries are ignored individually, so one bad mapping does not
+    prevent the service from starting.  A repeated model key keeps its last
+    valid value.
     """
     out: Dict[str, int] = {}
     if not raw:
@@ -516,9 +535,10 @@ def parse_num_ctx_by_model(raw: str) -> Dict[str, int]:
 
 
 def parse_model_alias_by_model(raw: str) -> Dict[str, str]:
-    """
-    Parse OLLAMA_MODEL_ALIAS_BY_MODEL from:
-    'modelA=modelA-8k,modelB=modelB-16k'
+    """Parse comma-separated ``requested-model=runtime-alias`` mappings.
+
+    Aliases let operators route a storefront model name to an Ollama model
+    created with a baked-in context length.
     """
     out: Dict[str, str] = {}
     if not raw:
@@ -544,7 +564,7 @@ def parse_model_alias_by_model(raw: str) -> Dict[str, str]:
 
 
 def normalize_model_name(model: str) -> str:
-    """Normalize common Ollama registry prefixes to a short model name."""
+    """Strip only Ollama's standard library registry prefix for map lookup."""
     m = (model or "").strip()
     if m.startswith("registry.ollama.ai/library/"):
         return m[len("registry.ollama.ai/library/"):]
@@ -566,7 +586,7 @@ DOMAIN_KNOWLEDGE_FUZZY_THRESHOLD = parse_probability(
 
 
 def resolve_num_ctx(model: str) -> Optional[int]:
-    """Resolve per-model num_ctx with fallback to OLLAMA_NUM_CTX."""
+    """Resolve context length by exact key, normalized key, then global default."""
     normalized = normalize_model_name(model)
     if model in MODEL_NUM_CTX_OVERRIDES:
         return MODEL_NUM_CTX_OVERRIDES[model]
@@ -576,7 +596,7 @@ def resolve_num_ctx(model: str) -> Optional[int]:
 
 
 def resolve_runtime_model(model: str) -> str:
-    """Resolve alias model name for runtime calls if configured."""
+    """Resolve an exact or normalized alias, otherwise preserve the input."""
     normalized = normalize_model_name(model)
     if model in MODEL_ALIAS_OVERRIDES:
         return MODEL_ALIAS_OVERRIDES[model]
@@ -586,7 +606,11 @@ def resolve_runtime_model(model: str) -> str:
 
 
 def resolve_local_path(path_value: str) -> Path:
-    """Resolve relative paths against the backend root directory."""
+    """Resolve relative paths against the directory containing ``app.py``.
+
+    Under Compose that directory is ``/app`` (a bind mount of the backend
+    repository), not the similarly named path on the WSL host.
+    """
     path = Path(path_value)
     if path.is_absolute():
         return path
@@ -594,7 +618,12 @@ def resolve_local_path(path_value: str) -> Path:
 
 
 def build_domain_knowledge_resolver() -> Optional[DomainKnowledgeResolver]:
-    """Initialize domain knowledge resolver from configured local source."""
+    """Build and eagerly validate the optional domain resolver.
+
+    A startup load failure is logged and degrades to no domain injection
+    rather than preventing the chat API from importing.  Once initialized,
+    the resolver checks the JSON source version on every request.
+    """
     if not DOMAIN_KNOWLEDGE_ENABLED:
         logger.info("🧩 Domain knowledge resolver is disabled via DOMAIN_KNOWLEDGE_ENABLED=0")
         return None
@@ -627,6 +656,7 @@ def build_domain_knowledge_resolver() -> Optional[DomainKnowledgeResolver]:
 
 
 def _string_or_none(value: Any) -> Optional[str]:
+    """Coerce non-null model values to the storefront's string representation."""
     if value is None:
         return None
     if isinstance(value, str):
@@ -635,11 +665,13 @@ def _string_or_none(value: Any) -> Optional[str]:
 
 
 def _string_or_empty(value: Any) -> str:
+    """Coerce a model value to a string, using ``""`` for JSON null."""
     text = _string_or_none(value)
     return text if text is not None else ""
 
 
 def _bool_value(value: Any) -> bool:
+    """Apply the response normalizer's permissive boolean coercion."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -648,7 +680,12 @@ def _bool_value(value: Any) -> bool:
 
 
 def sanitize_history(history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    """Keep only frontend-supported history items."""
+    """Keep only string ``user``/``assistant`` entries in their original order.
+
+    This is a shape and role allow-list, not a size or content sanitizer:
+    accepted content is neither stripped nor truncated, and arbitrary keys on
+    an accepted item are discarded before messages reach the model.
+    """
     sanitized: List[Dict[str, str]] = []
     for item in history:
         if not isinstance(item, dict):
@@ -671,6 +708,11 @@ def text_response_payload(
     response_type: str = "answer",
     trace: Optional[list[dict]] = None,
 ) -> Dict[str, Any]:
+    """Build the canonical one-text-block fallback response.
+
+    The request ID is always present here.  A trace is embedded only when
+    tracing was enabled at process startup and a trace list was supplied.
+    """
     payload: Dict[str, Any] = {
         "type": response_type if response_type in RESPONSE_TYPES else "answer",
         "request_id": request_id,
@@ -687,7 +729,15 @@ def text_response_payload(
 
 
 def normalize_blocks(raw_blocks: Any) -> List[Dict[str, Any]]:
-    """Normalize LLM output to the storefront-supported block schema."""
+    """Allow-list and coerce model blocks to the storefront response contract.
+
+    Supported kinds are ``text``, ``info_box``, ``product_list``, and the
+    project-specific ``formular`` spelling.  Unknown blocks and unknown keys
+    are dropped.  Product values are stringified and currently include a
+    ``price`` key even though the public prompt and MCP tools prohibit prices.
+    Form ``endpoint`` and ``method`` values are not forwarded by the current
+    normalizer.
+    """
     if not isinstance(raw_blocks, list):
         return []
 
@@ -769,7 +819,14 @@ def normalize_blocks(raw_blocks: Any) -> List[Dict[str, Any]]:
 
 
 def normalize_chat_reply(reply_text: str, *, request_id: str, trace: Optional[list[dict]] = None) -> Dict[str, Any]:
-    """Accept supported frontend response shapes and normalize to blocks."""
+    """Convert raw model text to the Shopware-facing response envelope.
+
+    Valid JSON objects with supported blocks are reduced through
+    :func:`normalize_blocks`.  Legacy ``reply``/``message`` objects and
+    non-JSON output become a single text block.  This fallback is about
+    transport stability; it does not claim that the upstream content is
+    semantically correct.
+    """
     raw = (reply_text or "").strip()
 
     try:
@@ -809,7 +866,13 @@ def normalize_chat_reply(reply_text: str, *, request_id: str, trace: Optional[li
 
 
 class ChatIn(BaseModel):
-    """Input model for /chat endpoint."""
+    """Request body accepted by :func:`chat`.
+
+    ``message`` and ``model`` are required strings.  ``history`` and
+    ``client`` default to empty containers, and unknown root fields are
+    ignored.  ``client`` remains opaque; in particular, ``contextToken`` is
+    neither inspected nor trusted by this backend.
+    """
     model_config = ConfigDict(extra="ignore")
 
     message: str
@@ -818,12 +881,17 @@ class ChatIn(BaseModel):
     client: Dict[str, Any] = Field(default_factory=dict)
 
 class Phase(Enum):
-    """Phases of the chat_with_tools loop."""
+    """Labels used in logs while moving from selection to final formatting."""
     TOOL = auto()
     FINAL = auto()
 
 class McpSessionCache:
-    """MCP Session Cache to reuse connections."""
+    """Reuse one streamable-HTTP MCP client session for the process lifetime.
+
+    Connection establishment and teardown are locked.  Tool calls themselves
+    are not serialized; on failure a caller closes the shared session,
+    reconnects, and retries that call exactly once.
+    """
     def __init__(self, mcp_url: str):
         self.mcp_url = mcp_url
         self._lock = asyncio.Lock()
@@ -834,6 +902,7 @@ class McpSessionCache:
         self._initialized = False
 
     async def _ensure_connected(self) -> ClientSession:
+        """Return the initialized session, creating its transport if needed."""
         async with self._lock:
             if self._session is not None and self._initialized:
                 return self._session
@@ -852,6 +921,7 @@ class McpSessionCache:
             return self._session
 
     async def close(self) -> None:
+        """Best-effort close the MCP session and transport during retry/shutdown."""
         async with self._lock:
             self._initialized = False
 
@@ -871,6 +941,7 @@ class McpSessionCache:
                 self._transport = None
 
     async def call_tool(self, tool_name: str, args: Dict[str, Any]) -> Any:
+        """Call a named MCP tool, reconnecting once after any exception."""
         # Ensure session
         session = await self._ensure_connected()
         try:
@@ -883,6 +954,7 @@ class McpSessionCache:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Close the cached MCP connection when FastAPI shuts down."""
     # startup: optionally warm up the MCP connection
     # await mcp_cache._ensure_connected()
     yield
@@ -909,12 +981,14 @@ app.add_middleware(
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
+    """Expose application ``HTTPException`` failures as ``{"message": ...}``."""
     detail = exc.detail if isinstance(exc.detail, str) else "Request failed"
     return JSONResponse(status_code=exc.status_code, content={"message": detail})
 
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+    """Return the proxy-facing validation envelope for malformed chat bodies."""
     return JSONResponse(
         status_code=422,
         content={
@@ -926,8 +1000,10 @@ async def request_validation_exception_handler(_: Request, exc: RequestValidatio
 
 @app.get("/healthz")
 def health():
-    """
-    Check endpoint to verify that the service is running.
+    """Report process liveness and effective non-secret configuration.
+
+    This endpoint does not call Ollama, MCP, or Shopware.  A 200 response
+    proves that FastAPI imported successfully, not that a chat can complete.
     """
     return {
         "status": "ok",
@@ -945,14 +1021,17 @@ def health():
 
 @app.post("/chat")
 async def chat(in_: ChatIn, request: Request):
-    """
-    Main chat endpoint for Shopware Storefront Chat.
+    """Orchestrate one public storefront chat request.
 
-    :param in_: Input data containing message, history, model, and client info
-    :type in_: ChatIn
-    :param request: FastAPI Request object
-    :type request: Request
-    :return: JSON response with chat answer blocks
+    Browser/proxy input becomes model messages, optional domain matches become
+    trusted system context, and optional product/category lookups cross the
+    MCP boundary.  The final raw model text is always normalized before it is
+    returned to Shopware.
+
+    The ``X-Request-Id`` header is trusted as an observability identifier, not
+    as authentication.  Unexpected model or MCP failures are wrapped as HTTP
+    502 responses.  Traces are stored after both model phases finish but
+    before response normalization.
     """
 
     trace_cleanup()
@@ -967,7 +1046,8 @@ async def chat(in_: ChatIn, request: Request):
                 "data": data,
             })
 
-    # contextToken is accepted from the storefront contract but intentionally ignored.
+    # The browser/Shopware context token is accepted inside ``client`` only for
+    # contract compatibility.  It grants no private or customer-specific tools.
     format_prompt = FORMAT_PROMPT_PUBLIC
     tools = TOOLS_PUBLIC
 
@@ -1006,31 +1086,25 @@ async def chat(in_: ChatIn, request: Request):
                 },
             )
 
-    """
-    Prepare messages for the LLM: system prompt + history + new user message.
-    """
+    # The tool-selection phase sees the fixed policy first, then optional
+    # backend-resolved domain context, safe history, and the current message.
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": TOOL_PROMPT},
     ]
     if domain_knowledge_prompt:
         messages.append({"role": "system", "content": domain_knowledge_prompt})
 
-    """
-    Append history from the frontend (if you send it there).
-    """
+    # Only user/assistant string entries survive the browser-history boundary.
     for h in sanitize_history(in_.history):
         messages.append(h)
 
-    """
-    Append current user message.
-    """
+    # The current message is intentionally distinct from replayed history.
     messages.append({"role": "user", "content": in_.message})
 
     logger.debug("📥 Actual Messages:\n%s", json.dumps(messages, ensure_ascii=False, indent=2))
 
-    """
-    Determine effective model to use
-    """
+    # An empty required model string falls back to the configured default.
+    # Alias and context lookups use the requested/effective name.
     requested_model = (in_.model or "").strip()
     effective_model = requested_model if requested_model else OLLAMA_MODEL
     runtime_model = resolve_runtime_model(effective_model)
@@ -1048,9 +1122,8 @@ async def chat(in_: ChatIn, request: Request):
             effective_model,
         )
 
-    """
-    Call LLM (with tools); implementation is in chat_with_tools(...)
-    """
+    # ``chat_with_tools`` performs the selection call and then an unconditional
+    # second call that formats the final JSON response.
     try:
         reply_text = await chat_with_tools(
             cast(List[ChatCompletionMessageParam], messages),
@@ -1074,11 +1147,12 @@ async def chat(in_: ChatIn, request: Request):
 
 @app.get("/trace/{request_id}")
 def get_trace(request_id: str):
-    """
-    Route to retrieve the trace for a given request ID.
-    
-    :param request_id: Description
-    :type request_id: str
+    """Return a model-complete request's current in-memory trace.
+
+    The route has no authentication.  Events can contain generated model
+    messages, tool arguments, and Shopware tool results, so production access
+    must be constrained outside this service.  Disabled tracing and unknown or
+    expired IDs both use HTTP 404 with different messages.
     """
     trace_cleanup()
 
@@ -1093,10 +1167,10 @@ def get_trace(request_id: str):
 
 
 def trace_cleanup() -> None:
-    """
-    Cleanup old traces from TRACE_STORE based on TTL.
+    """Lazily evict traces older than :data:`TRACE_TTL_SECONDS`.
 
-    :return: None
+    Cleanup runs only when ``/chat`` or ``/trace/{request_id}`` is requested;
+    there is no background task or persistent trace store.
     """
     if not TRACE_ENABLED:
         return
@@ -1112,14 +1186,10 @@ def truncate_log(
         role: str = "system", 
         field: str = "content"
         ) -> list[ChatCompletionMessageParam]:
-    """
-    Helper function to truncate long log messages for better readability.
+    """Return shallow message copies with selected log content shortened.
 
-    :param messages: List of chat messages
-    :param role: Role of messages to truncate
-    :param field: Field in the message to truncate
-    :return: List of messages with truncated content
-    :rtype: List[ChatCompletionMessageParam]
+    This helper affects debug rendering only; the unmodified ``messages`` list
+    is still sent to Ollama.
     """
     copy_msgs = [dict(m) for m in messages]
     for m in copy_msgs:
@@ -1136,25 +1206,19 @@ async def chat_with_tools(
         trace_add: Optional[Callable[[str, dict], None]] = None,
         request_id: Optional[str] = None,
         ) -> str:
-    """
-    Ask the model; if it requests tools, execute via MCP and loop until final text.
-    
-    :param messages: Messages to send to the model
-    :type messages: list[ChatCompletionMessageParam]
-    :param model: Model name to use
-    :type model: str
-    :param tools: Tool definitions for the model
-    :type tools: list[ChatCompletionToolUnionParam]
-    :param format_prompt: Prompt to use for final formatting
-    :type format_prompt: str
-    :param num_ctx: Optional Ollama context size for this request
-    :type num_ctx: Optional[int]
-    :param trace_add: Optional function to add trace events
-    :type trace_add: Optional[Callable[[str, dict], None]]
-    :param request_id: Optional request ID for tracing
-    :type request_id: Optional[str]
-    :return: Answer text from the model
-    :rtype: str
+    """Run tool selection once, execute requested MCP tools, then format JSON.
+
+    A successful invocation makes exactly two synchronous OpenAI-compatible
+    calls from this async function.  The first call may request zero or more
+    tools; all valid calls in that single response execute sequentially.  The
+    second call is unconditional after a successful selection/tool phase and
+    receives the formatting prompt, retained conversation messages, and any
+    tool results.  The first assistant message itself is not retained, and no
+    second tool-selection round occurs.
+
+    ``num_ctx`` is sent in Ollama-specific ``extra_body`` options on both model
+    calls.  ``trace_add`` receives compact request/response and tool events but
+    is a no-op when tracing is disabled.
     """
 
     def _trace(kind: str, data: dict) -> None:
@@ -1163,6 +1227,8 @@ async def chat_with_tools(
 
     phase = Phase.TOOL
 
+    # Although represented as a phase loop, the unconditional break below
+    # currently gives the model one tool-selection round.
     for _ in range(8):  # Limit to max 8 iterations
         logger.debug("🔄 Chat loop phase: %s", phase.name)
         logger.info("🧠 Sending to Ollama model %s", model)
@@ -1248,6 +1314,8 @@ async def chat_with_tools(
                     })
                 )
 
+        # Selection-phase text is intentionally not reused.  The final phase
+        # regenerates the answer under the structured-output prompt.
         phase = Phase.FINAL
         break
 
@@ -1256,6 +1324,8 @@ async def chat_with_tools(
     
     final_messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": format_prompt},
+        # Drop TOOL_PROMPT while retaining domain context, sanitized history,
+        # the current user message, and any appended MCP tool results.
         *messages[1:],
     ]
 
@@ -1309,15 +1379,13 @@ async def call_mcp_tool(
         tool_name: str, 
         args: Dict[str, Any]
         ) -> Dict[str, Any]:
-    """
-    Calls an MCP tool and processes the result into a dict.
-    
-    :param tool_name: Description
-    :type tool_name: str
-    :param args: Description
-    :type args: Dict[str, Any]
-    :return: Description
-    :rtype: Dict[str, Any]
+    """Call MCP and normalize SDK/legacy result shapes to a dictionary.
+
+    Native dictionaries pass through (with JSON decoded from a legacy
+    ``text`` wrapper when possible).  Official MCP JSON blocks are preferred
+    over text blocks; list/scalar JSON values are wrapped as ``{"items": ...}``.
+    Non-JSON text remains under ``text`` so the final model phase receives a
+    stable JSON-serializable tool payload.
     """
     result = await mcp_cache.call_tool(tool_name, args)
 

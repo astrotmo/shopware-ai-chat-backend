@@ -1,3 +1,10 @@
+"""Ranked exact, phrase, and conservative fuzzy domain-term resolution.
+
+Matching is deterministic and local; it does not query Shopware or the model.
+The resolver returns contextual hints for model tool-query construction, not
+authoritative proof that a matching product exists in the live catalogue.
+"""
+
 from __future__ import annotations
 
 import re
@@ -40,7 +47,7 @@ _VIA_WEIGHT = {
 
 
 def normalize_text(text: str, *, fold_umlauts: bool = False) -> str:
-    """Normalize free text for stable matching."""
+    """Lowercase, normalize separators/punctuation/space, and optionally fold umlauts."""
     value = (text or "").strip().lower()
     if not value:
         return ""
@@ -54,7 +61,7 @@ def normalize_text(text: str, *, fold_umlauts: bool = False) -> str:
 
 
 def _singularize_token(token: str) -> str:
-    """Apply conservative singularization to reduce plural mismatch misses."""
+    """Apply the resolver's deliberately small German suffix heuristic."""
     if len(token) <= 4:
         return token
     if token.endswith("en") and len(token) > 6:
@@ -69,6 +76,7 @@ def _singularize_token(token: str) -> str:
 
 
 def _singularize_phrase(text: str) -> str:
+    """Apply :func:`_singularize_token` independently to a phrase."""
     tokens = text.split()
     if not tokens:
         return text
@@ -77,7 +85,7 @@ def _singularize_phrase(text: str) -> str:
 
 
 def normalized_variants(text: str) -> set[str]:
-    """Return normalization variants (base, umlaut-folded, singularized)."""
+    """Return base, umlaut-folded, and singularized lookup variants."""
     base = normalize_text(text, fold_umlauts=False)
     if not base:
         return set()
@@ -88,6 +96,7 @@ def normalized_variants(text: str) -> set[str]:
 
 @dataclass(slots=True, frozen=True)
 class _Candidate:
+    """One indexed surface form belonging to a domain entry."""
     entry_id: str
     source_text: str
     normalized: str
@@ -97,13 +106,20 @@ class _Candidate:
 
 @dataclass(slots=True)
 class _ScoredMatch:
+    """Internal winner metadata used to de-duplicate matches by entry ID."""
     match: DomainKnowledgeMatch
     rank: int
     confidence: float
 
 
 class DomainKnowledgeResolver:
-    """Resolve user terms to canonical domain concepts."""
+    """Resolve user text to at most one best match per canonical entry.
+
+    Exact matches outrank phrase matches, which outrank fuzzy matches.
+    Canonical names then outrank synonyms, abbreviations, and related terms
+    within a stage.  Returned winners are sorted by confidence and canonical
+    name before ``max_matches`` is applied.
+    """
 
     def __init__(
         self,
@@ -114,6 +130,11 @@ class DomainKnowledgeResolver:
         fuzzy_min_term_length: int = 5,
         auto_reload: bool = False,
     ):
+        """Configure matching without loading provider data yet.
+
+        Thresholds are clamped defensively.  ``auto_reload`` compares the
+        provider version whenever :meth:`resolve_message` runs.
+        """
         self.provider = provider
         self.enable_fuzzy = enable_fuzzy
         self.fuzzy_threshold = max(0.0, min(1.0, fuzzy_threshold))
@@ -129,7 +150,11 @@ class DomainKnowledgeResolver:
         self._loaded = False
 
     def reload(self, *, force: bool = False) -> None:
-        """Reload entries from provider and rebuild indexes."""
+        """Replace resolver indexes from the provider's current data.
+
+        An unchanged non-null source version is a no-op unless ``force`` is
+        true.  Entry IDs form the de-duplication identity.
+        """
         version = self.provider.source_version()
         if self._loaded and not force and version is not None and version == self._source_version:
             return
@@ -154,7 +179,7 @@ class DomainKnowledgeResolver:
         self._loaded = True
 
     def resolve_message(self, message: str, *, max_matches: int = 5) -> list[DomainKnowledgeMatch]:
-        """Resolve a user message to a ranked list of domain knowledge matches."""
+        """Run exact, phrase, and optional fuzzy stages over message n-grams."""
         if not message or not message.strip():
             return []
 
@@ -185,10 +210,11 @@ class DomainKnowledgeResolver:
         return matches[:max_matches]
 
     def resolve_message_to_dicts(self, message: str, *, max_matches: int = 5) -> list[dict]:
-        """Convenience method for API/trace serialization."""
+        """Resolve and convert matches to the diagnostic serialization shape."""
         return [match.to_dict() for match in self.resolve_message(message, max_matches=max_matches)]
 
     def _ensure_loaded(self) -> None:
+        """Perform the initial load or an inexpensive auto-reload version check."""
         if not self._loaded:
             self.reload(force=True)
             return
@@ -196,6 +222,7 @@ class DomainKnowledgeResolver:
             self.reload(force=False)
 
     def _index_entry(self, entry: DomainTermEntry, raw_text: str, via: str) -> None:
+        """Index one canonical/synonym/abbreviation/related surface form."""
         normalized = normalize_text(raw_text)
         if not normalized:
             return
@@ -212,7 +239,8 @@ class DomainKnowledgeResolver:
         for variant in normalized_variants(raw_text):
             self._exact_index.setdefault(variant, []).append(candidate)
 
-        # Phrase matches are disabled for very short terms to avoid noise.
+        # Phrase matches are disabled for very short terms to avoid accidental
+        # substring-like matches in ordinary user sentences.
         if len(normalized) >= 4 or candidate.token_count > 1:
             self._phrase_candidates.append(candidate)
 
@@ -224,6 +252,7 @@ class DomainKnowledgeResolver:
         gram_index: dict[str, str],
         best_by_entry: dict[str, _ScoredMatch],
     ) -> None:
+        """Match normalized message n-grams against all indexed variants."""
         for gram_norm, matched_surface in gram_index.items():
             for candidate in self._exact_index.get(gram_norm, []):
                 confidence = _EXACT_CONFIDENCE.get(candidate.via, 0.9)
@@ -242,6 +271,7 @@ class DomainKnowledgeResolver:
         normalized_message: str,
         best_by_entry: dict[str, _ScoredMatch],
     ) -> None:
+        """Find boundary-delimited terms inside the normalized full message."""
         message_variants = normalized_variants(raw_message)
         message_variants.add(normalized_message)
 
@@ -269,6 +299,7 @@ class DomainKnowledgeResolver:
         gram_index: dict[str, str],
         best_by_entry: dict[str, _ScoredMatch],
     ) -> None:
+        """Apply guarded SequenceMatcher scoring to canonical/synonym candidates."""
         grams = [(norm, surface) for norm, surface in gram_index.items() if len(norm) >= self.fuzzy_min_term_length]
         if not grams:
             return
@@ -313,6 +344,7 @@ class DomainKnowledgeResolver:
         confidence: float,
         stage: str,
     ) -> None:
+        """Keep the highest-ranked candidate seen for a canonical entry."""
         entry = self._entries_by_id.get(candidate.entry_id)
         if entry is None:
             return
@@ -341,6 +373,7 @@ class DomainKnowledgeResolver:
         matched_via: str,
         confidence: float,
     ) -> DomainKnowledgeMatch:
+        """Copy only prompt/trace fields and choose preferred MCP query terms."""
         mcp_terms = entry.mcp_search_terms or [
             entry.canonical_name,
             *entry.synonyms,
@@ -361,12 +394,14 @@ class DomainKnowledgeResolver:
 
     @staticmethod
     def _contains_phrase(message_norm: str, phrase_norm: str) -> bool:
+        """Test normalized phrase containment with explicit space boundaries."""
         haystack = f" {message_norm.strip()} "
         needle = f" {phrase_norm.strip()} "
         return needle in haystack
 
     @staticmethod
     def _extract_surface(raw_message: str, phrase: str) -> str | None:
+        """Recover original user spelling when a direct phrase can be located."""
         pattern = r"\b" + re.escape(phrase).replace(r"\ ", r"\s+") + r"\b"
         match = re.search(pattern, raw_message, flags=re.IGNORECASE)
         if not match:
@@ -375,6 +410,7 @@ class DomainKnowledgeResolver:
 
     @staticmethod
     def _build_message_gram_index(message: str, *, max_tokens: int) -> dict[str, str]:
+        """Map normalized contiguous n-grams to their first original surface."""
         tokens = list(_WORD_RE.finditer(message))
         if not tokens:
             return {}
@@ -395,7 +431,7 @@ class DomainKnowledgeResolver:
 
 
 def iter_match_mcp_terms(matches: Iterable[DomainKnowledgeMatch]) -> list[str]:
-    """Flatten unique MCP search terms from resolver matches."""
+    """Flatten MCP terms case-insensitively while preserving encounter order."""
     out: list[str] = []
     seen: set[str] = set()
     for match in matches:

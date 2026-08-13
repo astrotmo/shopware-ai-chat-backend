@@ -1,3 +1,10 @@
+"""Typed records shared by domain knowledge loading, matching, and prompting.
+
+The JSON catalogue is treated as operator-managed input.  These dataclasses
+sanitize that input into predictable Python values before anything can be
+matched or injected into a model conversation.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -5,12 +12,14 @@ from typing import Any
 
 
 def _as_clean_str(value: Any) -> str:
+    """Coerce a JSON value to stripped text, using ``""`` for null."""
     if value is None:
         return ""
     return str(value).strip()
 
 
 def _as_string_list(value: Any) -> list[str]:
+    """Return non-empty strings, de-duplicated case-insensitively in input order."""
     if not isinstance(value, list):
         return []
     out: list[str] = []
@@ -29,7 +38,11 @@ def _as_string_list(value: Any) -> list[str]:
 
 @dataclass(slots=True)
 class DomainTermEntry:
-    """Single domain concept from a backend-managed knowledge source."""
+    """One canonical shop concept and the terms that can resolve to it.
+
+    ``shop_examples`` are loaded for catalogue maintenance but are not
+    included in :class:`DomainKnowledgeMatch` or the current model prompt.
+    """
 
     id: str
     canonical_name: str
@@ -43,7 +56,11 @@ class DomainTermEntry:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "DomainTermEntry":
-        """Parse and sanitize one domain entry from JSON/CSV-like records."""
+        """Parse one provider record, requiring only ``canonical_name``.
+
+        A missing ID is derived from the lower-cased canonical name by
+        replacing spaces with hyphens.  List fields accept JSON lists only.
+        """
         canonical_name = _as_clean_str(raw.get("canonical_name"))
         if not canonical_name:
             raise ValueError("domain entry is missing canonical_name")
@@ -65,7 +82,7 @@ class DomainTermEntry:
 
 @dataclass(slots=True)
 class DomainKnowledgeMatch:
-    """Structured resolver output used for prompt injection and downstream logic."""
+    """One ranked match serialized into prompts and diagnostic traces."""
 
     matched_text: str
     matched_via: str
@@ -79,7 +96,7 @@ class DomainKnowledgeMatch:
     entry_id: str
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to a JSON-serializable dictionary."""
+        """Return the trace/prompt-facing shape with four-decimal confidence."""
         return {
             "matched_text": self.matched_text,
             "matched_via": self.matched_via,

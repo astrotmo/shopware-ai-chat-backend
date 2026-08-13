@@ -1,3 +1,5 @@
+"""Provider boundary for backend-managed domain term catalogues."""
+
 from __future__ import annotations
 
 import json
@@ -8,7 +10,12 @@ from .domain_knowledge_models import DomainTermEntry
 
 
 class DomainTermsProvider(Protocol):
-    """Provider abstraction so resolver logic is decoupled from file format."""
+    """Minimal source contract consumed by :class:`DomainKnowledgeResolver`.
+
+    ``source_version`` is an inexpensive change token.  Returning ``None``
+    means no stable version is available, so an auto-reloading resolver cannot
+    skip a provider load on that basis.
+    """
 
     def load_terms(self) -> list[DomainTermEntry]:
         ...
@@ -18,12 +25,14 @@ class DomainTermsProvider(Protocol):
 
 
 class JsonDomainTermsProvider:
-    """Load domain terms from a local JSON file (list-of-objects)."""
+    """Load a UTF-8 JSON array of domain term objects from local storage."""
 
     def __init__(self, file_path: str | Path):
+        """Store the path without reading it; resolver startup controls loading."""
         self.file_path = Path(file_path)
 
     def source_version(self) -> str | None:
+        """Return an mtime/size token, or ``None`` while the file is absent."""
         try:
             stat = self.file_path.stat()
         except FileNotFoundError:
@@ -31,6 +40,11 @@ class JsonDomainTermsProvider:
         return f"{stat.st_mtime_ns}:{stat.st_size}"
 
     def load_terms(self) -> list[DomainTermEntry]:
+        """Validate the top-level/list item shapes and sanitize every entry.
+
+        A malformed item fails the complete load rather than producing a
+        partially indexed knowledge catalogue.
+        """
         if not self.file_path.exists():
             raise FileNotFoundError(f"Domain knowledge file not found: {self.file_path}")
 

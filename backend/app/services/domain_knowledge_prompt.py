@@ -1,3 +1,5 @@
+"""Deterministic rendering of resolved terms into model system context."""
+
 from __future__ import annotations
 
 from typing import Sequence
@@ -6,7 +8,12 @@ from .domain_knowledge_models import DomainKnowledgeMatch
 
 
 def build_domain_knowledge_prompt_block(matches: Sequence[DomainKnowledgeMatch]) -> str:
-    """Build a compact deterministic system block for resolved domain context."""
+    """Render only supplied matches as trusted tool-query guidance.
+
+    Resolution happens before this function; it neither searches the full
+    catalogue nor modifies model/tool policy.  Keeping the block deterministic
+    makes the exact injected context visible in debug logs and traces.
+    """
     if not matches:
         return ""
 
